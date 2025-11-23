@@ -1,0 +1,4 @@
+sdrscan.yaml
+*/__pycache__
+*.pyc
+*.swp

@@ -1,0 +1,20 @@
+receivers:
+  - type: RTL-SDR
+
+channel_defaults:
+  squelchThreshold: -55
+
+channels:
+
+  - freq: 146.52
+
+  - freq: 462.5625
+    label: GMRS 1
+
+  - freq: 467.5625
+    label: GMRS 8
+    audioGain_dB: 3.0
+    dwellTime_s: 6.0
+    squelchThreshold: -60
+    mode: NFM
+
