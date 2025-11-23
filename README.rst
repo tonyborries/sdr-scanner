@@ -128,6 +128,13 @@ A wxPython app provides a GUI for the scanner.
     python3 gui_scan.py
 
 
+The interface display recently active channels. The background color indicates:
+
+- **Green:** Currently active.
+- **Yellow:** Recently active, Dwelling on the Channel.
+- **Grey:** Recently active, scanning has resumed.
+
+
 Channel Modes
 =============
 
