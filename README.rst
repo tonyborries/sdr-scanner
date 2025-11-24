@@ -153,7 +153,7 @@ and sometimes also referred to as Wide FM. No support for this is included as of
 If mismatched, the following will occur:
 
 - A **Narrow** transmitted signal will be very quiet on a **Wide** receiver channel.
-- A **Wide** transmitted signal will be loud and distorted on a **Narrow** channel.
+- A **Wide** transmitted signal will be loud and distorted on a **Narrow** receiver channel.
 
 As a starting point...
 
@@ -161,6 +161,7 @@ As a starting point...
 - **Public Safety/Commercial:** - most have migrated to **Narrow**
 - **FRS / GMRS:** - These channels have a mix of **Wide** and **Narrow** - check frequency lists for details.
 - **Marine VHF:** **Wide**
+- **NOAA Weather Radio:** **Wide**
 
 
 Future Work

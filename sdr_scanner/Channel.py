@@ -1,4 +1,5 @@
 from enum import IntEnum
+import math
 import time
 from typing import Any, Dict, List, Optional
 import uuid
@@ -110,7 +111,7 @@ class Channel():
                 self.audioGain_dB,
                 self.squelchThreshold,
                 self.dwellTime_s,
-                AUDIO_SAMPLERATE=audioSampleRate,
+                audioSampleRate=audioSampleRate,
                 rfSampleRate=rfSampleRate
             )
 
@@ -139,7 +140,7 @@ class Channel():
 
 
 class ChannelBlock_FM(gr.hier_block2):
-    def __init__(self, channelId, label: str, channelFreq_hz: int, hardwareFreq_hz: int, deviation_hz: int, audioGain_dB: float, squelchThreshold: float, dwellTime_s: float, AUDIO_SAMPLERATE, rfSampleRate):
+    def __init__(self, channelId, label: str, channelFreq_hz: int, hardwareFreq_hz: int, deviation_hz: int, audioGain_dB: float, squelchThreshold: float, dwellTime_s: float, audioSampleRate, rfSampleRate):
         gr.hier_block2.__init__(
             self, "FM_Channel",
                 gr.io_signature(1, 1, gr.sizeof_gr_complex*1),
@@ -163,21 +164,62 @@ class ChannelBlock_FM(gr.hier_block2):
         ##################################################
         # Parameters
         ##################################################
-        self.AUDIO_SAMPLERATE = AUDIO_SAMPLERATE
+        self.audioSampleRate = audioSampleRate
         self.rfSampleRate = rfSampleRate
+
+        fmQuadRate = audioSampleRate * 4
+
+        if self.rfSampleRate % fmQuadRate != 0:
+            raise Exception(f"RF Sample Rate ({self.rfSampleRate}) is not a multiple of FM Quad Rate ({fmQuadRate})")
+
+        inputDecimation = self.rfSampleRate // fmQuadRate
+
+        def _filterDec(x):
+            n = int(math.sqrt(x))
+            while n > 1:
+                if x % n == 0:
+                    return n, x // n
+                n -= 1
+            return 1, x
+
+        intermediateDecimation, xlatDecimation = _filterDec(inputDecimation)
 
         ##################################################
         # Blocks
         ##################################################
 
+        ###
+        # Input Channelization
+
         half_bandwidth = (self._deviation_hz + 3000)
 
-        self.freq_xlating_fir_filter_xxx_0 = gr_filter.freq_xlating_fir_filter_ccc(
-            int(self.rfSampleRate/(AUDIO_SAMPLERATE*4)),
-            firdes.complex_band_pass(1.0, self.rfSampleRate, half_bandwidth * -1, half_bandwidth, half_bandwidth*2),
-            freqOffset_Hz,
-            self.rfSampleRate
-        )
+        self.input_intermediate_filter = None
+        if inputDecimation >= 8 and intermediateDecimation > 1:
+            # Use an intermediate filter to spread out decimation, hopefully lowering CPU requirements
+
+            self.freq_xlating_filter = gr_filter.freq_xlating_fft_filter_ccc(
+                xlatDecimation,
+                firdes.low_pass(1.0, self.rfSampleRate, self.rfSampleRate/(2*xlatDecimation), self.rfSampleRate/(4*xlatDecimation)),
+                freqOffset_Hz,
+                self.rfSampleRate
+            )
+            self.input_intermediate_filter = gr_filter.fft_filter_ccc(
+                intermediateDecimation,
+                firdes.low_pass(1, self.rfSampleRate/xlatDecimation, half_bandwidth, half_bandwidth/4),
+                2
+            )
+
+        else:
+            self.freq_xlating_filter = gr_filter.freq_xlating_fir_filter_ccc(
+                int(self.rfSampleRate/fmQuadRate),
+                firdes.low_pass(1.0, self.rfSampleRate, half_bandwidth, half_bandwidth/4),
+                freqOffset_Hz,
+                self.rfSampleRate
+            )
+
+        ###
+        # Squelch and Demod
+
         self.analog_pwr_squelch_xx_0 = analog.pwr_squelch_cc(
             self.squelchThreshold,
             0.005,
@@ -185,16 +227,20 @@ class ChannelBlock_FM(gr.hier_block2):
             False
         )
         self.analog_nbfm_rx_0 = analog.nbfm_rx(
-            audio_rate=AUDIO_SAMPLERATE,
-            quad_rate=AUDIO_SAMPLERATE*4,
+            audio_rate=audioSampleRate,
+            quad_rate=fmQuadRate,
             tau=75e-6,
             max_dev=self._deviation_hz,
           )
-        self.audioFilter_0 = gr_filter.fir_filter_fff(
+
+        ###
+        # Audio Filter
+
+        self.audioFilter_0 = gr_filter.fft_filter_fff(
             1,
             firdes.band_pass(
                 1,
-                AUDIO_SAMPLERATE,
+                audioSampleRate,
                 200,
                 3500,
                 100,
@@ -212,8 +258,14 @@ class ChannelBlock_FM(gr.hier_block2):
         self.connect((self.audioFilter_0, 0), (self.audioGain_0, 0))
         self.connect((self.analog_nbfm_rx_0, 0), (self.audioFilter_0, 0))
         self.connect((self.analog_pwr_squelch_xx_0, 0), (self.analog_nbfm_rx_0, 0))
-        self.connect((self.freq_xlating_fir_filter_xxx_0, 0), (self.analog_pwr_squelch_xx_0, 0))
-        self.connect((self, 0), (self.freq_xlating_fir_filter_xxx_0, 0))
+
+        if self.input_intermediate_filter:
+            self.connect((self.input_intermediate_filter, 0), (self.analog_pwr_squelch_xx_0, 0))
+            self.connect((self.freq_xlating_filter, 0), (self.input_intermediate_filter, 0))
+        else:
+            self.connect((self.freq_xlating_filter, 0), (self.analog_pwr_squelch_xx_0, 0))
+
+        self.connect((self, 0), (self.freq_xlating_filter, 0))
 
     def setAudioGain(self, dB: float):
         self.audioGainFactor = dbToRatio(dB)
