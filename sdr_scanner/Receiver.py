@@ -20,6 +20,9 @@ class ReceiverType(IntEnum):
 
 class ReceiverBlock(gr.top_block):
 
+    def __init__(self):
+        gr.top_block.__init__(self, "RTL-SDR Rx", catch_exceptions=True)
+
     def setupWindow(self, scanWindow, audioSink):
         raise NotImplementedError()
 
@@ -76,7 +79,7 @@ class Receiver_RTLSDR(ReceiverBlock):
     ]
 
     def __init__(self, deviceArg=''):
-        gr.top_block.__init__(self, "RTL-SDR Rx", catch_exceptions=True)
+        super().__init__()
 
         self.soapy_rtlsdr_source_0 = None
         dev = 'driver=rtlsdr'
@@ -103,7 +106,6 @@ class Receiver_RTLSDR(ReceiverBlock):
         # connect window to receiver and output audio
         self.connect( (scanWindow.scanWindowBlock, 0), (audioSink, 0) )
         self.connect( (self.soapy_rtlsdr_source_0, 0), (scanWindow.scanWindowBlock, 0) )
-
 
     def teardownWindow(self, scanWindow, audioSink):
         # disconnect

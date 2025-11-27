@@ -20,10 +20,23 @@ class ChannelStatus(IntEnum):
 class ChannelMode(IntEnum):
     FM = 1
     NFM = 2
+    AM = 3
 
 
 def dbToRatio(dB: float) -> float:
     return 10 ** (dB/20)
+
+def _filterDec(x):
+    """
+    For a 2-stage decimation, find the closest factors.
+    Return the smaller factor first.
+    """
+    n = int(math.sqrt(x))
+    while n > 1:
+        if x % n == 0:
+            return n, x // n
+        n -= 1
+    return 1, x
 
 
 class ChannelConfig():
@@ -44,6 +57,7 @@ class ChannelConfig():
         return {
             "FM": ChannelMode.FM,
             "NFM": ChannelMode.NFM,
+            "AM": ChannelMode.AM,
         }.get(modeStr.upper())
 
     @classmethod
@@ -114,6 +128,18 @@ class Channel():
                 audioSampleRate=audioSampleRate,
                 rfSampleRate=rfSampleRate
             )
+        elif mode == ChannelMode.AM:
+            self.channelBlock = ChannelBlock_AM(
+                self.id,
+                self.label,
+                self.freq_hz,
+                self.hardwareFreq_hz,
+                self.audioGain_dB,
+                self.squelchThreshold,
+                self.dwellTime_s,
+                audioSampleRate=audioSampleRate,
+                rfSampleRate=rfSampleRate
+            )
 
         if not self.channelBlock:
             raise Exception("Channel Block not Initialized - Check Mode setting")
@@ -174,14 +200,6 @@ class ChannelBlock_FM(gr.hier_block2):
 
         inputDecimation = self.rfSampleRate // fmQuadRate
 
-        def _filterDec(x):
-            n = int(math.sqrt(x))
-            while n > 1:
-                if x % n == 0:
-                    return n, x // n
-                n -= 1
-            return 1, x
-
         intermediateDecimation, xlatDecimation = _filterDec(inputDecimation)
 
         ##################################################
@@ -193,24 +211,24 @@ class ChannelBlock_FM(gr.hier_block2):
 
         half_bandwidth = (self._deviation_hz + 3000)
 
-        self.input_intermediate_filter = None
+        self.blockInputIntermediateFilter = None
         if inputDecimation >= 8 and intermediateDecimation > 1:
             # Use an intermediate filter to spread out decimation, hopefully lowering CPU requirements
 
-            self.freq_xlating_filter = gr_filter.freq_xlating_fft_filter_ccc(
+            self.blockFreqXlatingFilter = gr_filter.freq_xlating_fft_filter_ccc(
                 xlatDecimation,
                 firdes.low_pass(1.0, self.rfSampleRate, self.rfSampleRate/(2*xlatDecimation), self.rfSampleRate/(4*xlatDecimation)),
                 freqOffset_Hz,
                 self.rfSampleRate
             )
-            self.input_intermediate_filter = gr_filter.fft_filter_ccc(
+            self.blockInputIntermediateFilter = gr_filter.fft_filter_ccc(
                 intermediateDecimation,
                 firdes.low_pass(1, self.rfSampleRate/xlatDecimation, half_bandwidth, half_bandwidth/4),
                 2
             )
 
         else:
-            self.freq_xlating_filter = gr_filter.freq_xlating_fir_filter_ccc(
+            self.blockFreqXlatingFilter = gr_filter.freq_xlating_fir_filter_ccc(
                 int(self.rfSampleRate/fmQuadRate),
                 firdes.low_pass(1.0, self.rfSampleRate, half_bandwidth, half_bandwidth/4),
                 freqOffset_Hz,
@@ -220,13 +238,13 @@ class ChannelBlock_FM(gr.hier_block2):
         ###
         # Squelch and Demod
 
-        self.analog_pwr_squelch_xx_0 = analog.pwr_squelch_cc(
+        self.blockAnalogPowerSquelch = analog.pwr_squelch_cc(
             self.squelchThreshold,
             0.005,
             0,
             False
         )
-        self.analog_nbfm_rx_0 = analog.nbfm_rx(
+        self.blockAnalogNbfmRx = analog.nbfm_rx(
             audio_rate=audioSampleRate,
             quad_rate=fmQuadRate,
             tau=75e-6,
@@ -236,7 +254,7 @@ class ChannelBlock_FM(gr.hier_block2):
         ###
         # Audio Filter
 
-        self.audioFilter_0 = gr_filter.fft_filter_fff(
+        self.blockAudioFilter = gr_filter.fft_filter_fff(
             1,
             firdes.band_pass(
                 1,
@@ -248,41 +266,188 @@ class ChannelBlock_FM(gr.hier_block2):
                 6.76
             )
         )
-        self.audioGain_0 = blocks.multiply_const_ff(self.audioGainFactor)
+        self.blockAudioGain = blocks.multiply_const_ff(self.audioGainFactor)
 
 
         ##################################################
         # Connections
         ##################################################
-        self.connect((self.audioGain_0, 0), (self, 0))
-        self.connect((self.audioFilter_0, 0), (self.audioGain_0, 0))
-        self.connect((self.analog_nbfm_rx_0, 0), (self.audioFilter_0, 0))
-        self.connect((self.analog_pwr_squelch_xx_0, 0), (self.analog_nbfm_rx_0, 0))
+        self.connect((self.blockAudioGain, 0), (self, 0))
+        self.connect((self.blockAudioFilter, 0), (self.blockAudioGain, 0))
+        self.connect((self.blockAnalogNbfmRx, 0), (self.blockAudioFilter, 0))
+        self.connect((self.blockAnalogPowerSquelch, 0), (self.blockAnalogNbfmRx, 0))
 
-        if self.input_intermediate_filter:
-            self.connect((self.input_intermediate_filter, 0), (self.analog_pwr_squelch_xx_0, 0))
-            self.connect((self.freq_xlating_filter, 0), (self.input_intermediate_filter, 0))
+        if self.blockInputIntermediateFilter:
+            self.connect((self.blockInputIntermediateFilter, 0), (self.blockAnalogPowerSquelch, 0))
+            self.connect((self.blockFreqXlatingFilter, 0), (self.blockInputIntermediateFilter, 0))
         else:
-            self.connect((self.freq_xlating_filter, 0), (self.analog_pwr_squelch_xx_0, 0))
+            self.connect((self.blockFreqXlatingFilter, 0), (self.blockAnalogPowerSquelch, 0))
 
-        self.connect((self, 0), (self.freq_xlating_filter, 0))
+        self.connect((self, 0), (self.blockFreqXlatingFilter, 0))
 
     def setAudioGain(self, dB: float):
         self.audioGainFactor = dbToRatio(dB)
-        self.blocks_multiply_const_vxx_0.set_k(self.audioGainFactor)
+        self.blockAudioGain.set_k(self.audioGainFactor)
 
     def setSquelchValue(self, squelchThreshold):
         self.squelchThreshold = squelchThreshold
-        self.analog_pwr_squelch_xx_0.set_threshold(squelchThreshold)
+        self.blockAnalogPowerSquelch.set_threshold(squelchThreshold)
 
     def getStatus(self, statusPipe):
         status = ChannelStatus.IDLE
-        if self.analog_pwr_squelch_xx_0.unmuted():
+        if self.blockAnalogPowerSquelch.unmuted():
+            self._active = True
             self._lastActive = time.time()
             status = ChannelStatus.ACTIVE
-            if not self._active:
-                self._active = True
-#                print(f"\n{datetime.datetime.now().time().isoformat()} - {self._label}")
+        else:
+            self._active = False
+            if time.time() - self._lastActive < self._dwellTime:
+                status = ChannelStatus.DWELL
+
+        if status != self._lastStatusReport:
+            self._lastStatusReport = status
+            if statusPipe:
+                statusPipe.send([{
+                    'type': 'channel_status',
+                    'data': {
+                        'id': self.channelId,
+                        'status': status,
+                        # 'rssi': <RSSI>
+                    }
+                }])
+
+        return status
+
+
+class ChannelBlock_AM(gr.hier_block2):
+
+    FIXED_AUDIO_GAIN_FACTOR = 3
+
+    def __init__(self, channelId, label: str, channelFreq_hz: int, hardwareFreq_hz: int, audioGain_dB: float, squelchThreshold: float, dwellTime_s: float, audioSampleRate, rfSampleRate):
+        gr.hier_block2.__init__(
+            self, "AM_Channel",
+                gr.io_signature(1, 1, gr.sizeof_gr_complex*1),
+                gr.io_signature(1, 1, gr.sizeof_float*1),
+        )
+
+        self.channelId = channelId
+
+        self._label = label
+        self._lastActive = 0
+        self._active = False
+        self._dwellTime = dwellTime_s
+        self.audioGainFactor = dbToRatio(audioGain_dB) * self.FIXED_AUDIO_GAIN_FACTOR
+        self.squelchThreshold = squelchThreshold
+
+        self._lastStatusReport = None
+
+        freqOffset_Hz = channelFreq_hz - hardwareFreq_hz
+
+        ##################################################
+        # Parameters
+        ##################################################
+        self.audioSampleRate = audioSampleRate
+        self.rfSampleRate = rfSampleRate
+
+        inputDecimation = self.rfSampleRate // self.audioSampleRate
+
+        intermediateDecimation, xlatDecimation = _filterDec(inputDecimation)
+
+        ##################################################
+        # Blocks
+        ##################################################
+
+        ###
+        # Input Channelization
+
+        self.blockInputIntermediateFilter = None
+        if inputDecimation >= 8 and intermediateDecimation > 1:
+            # Use an intermediate filter to spread out decimation, hopefully lowering CPU requirements
+
+            self.blockFreqXlatingFilter = gr_filter.freq_xlating_fft_filter_ccc(
+                xlatDecimation,
+                firdes.low_pass(1.0, self.rfSampleRate, self.rfSampleRate/(2*xlatDecimation), self.rfSampleRate/(4*xlatDecimation)),
+                freqOffset_Hz,
+                self.rfSampleRate
+            )
+            self.blockInputIntermediateFilter = gr_filter.fft_filter_ccc(
+                intermediateDecimation,
+                firdes.low_pass(1, self.rfSampleRate/xlatDecimation, 4000, 2000),
+                2
+            )
+
+        else:
+            self.blockFreqXlatingFilter = gr_filter.freq_xlating_fir_filter_ccc(
+                int(self.rfSampleRate/self.audioSampleRate),
+                firdes.low_pass(1.0, self.rfSampleRate, 4000, 2000),
+                freqOffset_Hz,
+                self.rfSampleRate
+            )
+
+        ###
+        # Squelch and Demod
+
+        self.blockAnalogPowerSquelch = analog.pwr_squelch_cc(
+            self.squelchThreshold,
+            0.005,
+            0,
+            False
+        )
+
+        self.blockAnalogAgc = analog.feedforward_agc_cc(int(self.audioSampleRate * 0.2), 0.5)
+
+        self.blockAnalogAMDemod = blocks.complex_to_mag(1)
+
+        ###
+        # Audio
+
+        self.blockAudioFilter = gr_filter.fft_filter_fff(
+            1,
+            firdes.band_pass(
+                1,
+                self.audioSampleRate,
+                200,
+                3500,
+                100,
+                window.WIN_HAMMING,
+                6.76
+            )
+        )
+        self.blockAudioGain = blocks.multiply_const_ff(self.audioGainFactor)
+
+        ##################################################
+        # Connections
+        ##################################################
+
+        self.connect((self.blockAudioGain, 0), (self, 0))
+        self.connect((self.blockAudioFilter, 0), (self.blockAudioGain, 0))
+        self.connect((self.blockAnalogAMDemod, 0), (self.blockAudioFilter, 0))
+        self.connect((self.blockAnalogAgc, 0), (self.blockAnalogAMDemod, 0))
+        
+        self.connect((self.blockAnalogPowerSquelch, 0), (self.blockAnalogAgc, 0))
+
+        if self.blockInputIntermediateFilter:
+            self.connect((self.blockInputIntermediateFilter, 0), (self.blockAnalogPowerSquelch, 0))
+            self.connect((self.blockFreqXlatingFilter, 0), (self.blockInputIntermediateFilter, 0))
+        else:
+            self.connect((self.blockFreqXlatingFilter, 0), (self.blockAnalogPowerSquelch, 0))
+
+        self.connect((self, 0), (self.blockFreqXlatingFilter, 0))
+
+    def setAudioGain(self, dB: float):
+        self.audioGainFactor = dbToRatio(dB)
+        self.blockAudioGain.set_k(self.audioGainFactor * self.FIXED_AUDIO_GAIN_FACTOR)
+
+    def setSquelchValue(self, squelchThreshold):
+        self.squelchThreshold = squelchThreshold
+        self.blockAnalogPowerSquelch.set_threshold(squelchThreshold)
+
+    def getStatus(self, statusPipe):
+        status = ChannelStatus.IDLE
+        if self.blockAnalogPowerSquelch.unmuted():
+            self._active = True
+            self._lastActive = time.time()
+            status = ChannelStatus.ACTIVE
         else:
             self._active = False
             if time.time() - self._lastActive < self._dwellTime:
