@@ -9,6 +9,7 @@ from gnuradio import audio
 from gnuradio import gr
 from gnuradio import soapy
 
+from .const import AUDIO_SAMPLERATE
 from .Channel import Channel
 from .ScanWindow import ScanWindow
 
@@ -63,7 +64,6 @@ class ReceiverBlock(gr.top_block):
 
         # radio specific teardown
         self.teardownWindow(scanWindow, audioSink)
-
 
 
 class Receiver_RTLSDR(ReceiverBlock):
@@ -125,12 +125,10 @@ def lookupRxBlockCls(rxType: ReceiverType) -> "ReceiverBlock":
 
 
 class Receiver():
-    def __init__(self, rxId, rxType: ReceiverType, receiverArgs: Dict[str, Any], audioSampleRate: int):
+    def __init__(self, rxId, rxType: ReceiverType, receiverArgs: Dict[str, Any]):
         self.id = rxId
         self.rxType = rxType
         self.receiverArgs = receiverArgs
-
-        self.audioSampleRate = audioSampleRate
 
         self._scanWindowsById = {}
 
@@ -163,10 +161,8 @@ class Receiver():
 
 class ReceiverConfig():
 
-    def __init__(self, rxTypeStr: str, receiverArgs: Dict[str, Any], audioSampleRate: int):
+    def __init__(self, rxTypeStr: str, receiverArgs: Dict[str, Any]):
         self.id = uuid.uuid4()
-
-        self.audioSampleRate = audioSampleRate
 
         self.receiverArgs = receiverArgs
         if self.receiverArgs is None:
@@ -189,8 +185,6 @@ class ReceiverConfig():
 
 
 
-
-
 def runAsProcess(pipe, receiverConfig: ReceiverConfig):
 
 #    with contextlib.redirect_stderr(None):
@@ -200,11 +194,11 @@ def runAsProcess(pipe, receiverConfig: ReceiverConfig):
 def _runAsProcess(pipe, receiverConfig: ReceiverConfig):
 
 
-    rx = Receiver(receiverConfig.id, receiverConfig.rxType, receiverConfig.receiverArgs, receiverConfig.audioSampleRate)
+    rx = Receiver(receiverConfig.id, receiverConfig.rxType, receiverConfig.receiverArgs)
 
     rxBlock = rx.getReceiverBlock()
 
-    audio_sink_0 = audio.sink(receiverConfig.audioSampleRate, '', True)
+    audio_sink_0 = audio.sink(AUDIO_SAMPLERATE, '', True)
 
     while True:
 

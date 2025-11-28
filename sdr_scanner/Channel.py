@@ -11,6 +11,8 @@ from gnuradio.filter import firdes
 from gnuradio import gr
 from gnuradio.fft import window
 
+from .const import AUDIO_SAMPLERATE, FM_QUAD_RATE
+
 
 class ChannelStatus(IntEnum):
     IDLE = 0
@@ -92,7 +94,7 @@ class ChannelConfig():
 
 
 class Channel():
-    def __init__(self, channelId, freq_hz: int, label: str, mode: ChannelMode, audioGain_dB: float, dwellTime_s: float, squelchThreshold:float, hardwareFreq_hz, audioSampleRate, rfSampleRate):
+    def __init__(self, channelId, freq_hz: int, label: str, mode: ChannelMode, audioGain_dB: float, dwellTime_s: float, squelchThreshold:float, hardwareFreq_hz, rfSampleRate):
 
         self.id = channelId
 
@@ -125,7 +127,6 @@ class Channel():
                 self.audioGain_dB,
                 self.squelchThreshold,
                 self.dwellTime_s,
-                audioSampleRate=audioSampleRate,
                 rfSampleRate=rfSampleRate
             )
         elif mode == ChannelMode.AM:
@@ -137,7 +138,6 @@ class Channel():
                 self.audioGain_dB,
                 self.squelchThreshold,
                 self.dwellTime_s,
-                audioSampleRate=audioSampleRate,
                 rfSampleRate=rfSampleRate
             )
 
@@ -156,7 +156,6 @@ class Channel():
             dwellTime_s=cc.dwellTime_s,
             squelchThreshold=cc.squelchThreshold,
             hardwareFreq_hz=swc.hardwareFreq_hz,
-            audioSampleRate=swc.audioSampleRate,
             rfSampleRate=swc.rfSampleRate,
         )
         return channel
@@ -166,7 +165,7 @@ class Channel():
 
 
 class ChannelBlock_FM(gr.hier_block2):
-    def __init__(self, channelId, label: str, channelFreq_hz: int, hardwareFreq_hz: int, deviation_hz: int, audioGain_dB: float, squelchThreshold: float, dwellTime_s: float, audioSampleRate, rfSampleRate):
+    def __init__(self, channelId, label: str, channelFreq_hz: int, hardwareFreq_hz: int, deviation_hz: int, audioGain_dB: float, squelchThreshold: float, dwellTime_s: float, rfSampleRate):
         gr.hier_block2.__init__(
             self, "FM_Channel",
                 gr.io_signature(1, 1, gr.sizeof_gr_complex*1),
@@ -190,15 +189,13 @@ class ChannelBlock_FM(gr.hier_block2):
         ##################################################
         # Parameters
         ##################################################
-        self.audioSampleRate = audioSampleRate
         self.rfSampleRate = rfSampleRate
 
-        fmQuadRate = audioSampleRate * 4
 
-        if self.rfSampleRate % fmQuadRate != 0:
-            raise Exception(f"RF Sample Rate ({self.rfSampleRate}) is not a multiple of FM Quad Rate ({fmQuadRate})")
+        if self.rfSampleRate % FM_QUAD_RATE != 0:
+            raise Exception(f"RF Sample Rate ({self.rfSampleRate}) is not a multiple of FM Quad Rate ({FM_QUAD_RATE})")
 
-        inputDecimation = self.rfSampleRate // fmQuadRate
+        inputDecimation = self.rfSampleRate // FM_QUAD_RATE
 
         intermediateDecimation, xlatDecimation = _filterDec(inputDecimation)
 
@@ -229,7 +226,7 @@ class ChannelBlock_FM(gr.hier_block2):
 
         else:
             self.blockFreqXlatingFilter = gr_filter.freq_xlating_fir_filter_ccc(
-                int(self.rfSampleRate/fmQuadRate),
+                self.rfSampleRate // FM_QUAD_RATE,
                 firdes.low_pass(1.0, self.rfSampleRate, half_bandwidth, half_bandwidth/4),
                 freqOffset_Hz,
                 self.rfSampleRate
@@ -245,8 +242,8 @@ class ChannelBlock_FM(gr.hier_block2):
             False
         )
         self.blockAnalogNbfmRx = analog.nbfm_rx(
-            audio_rate=audioSampleRate,
-            quad_rate=fmQuadRate,
+            audio_rate=AUDIO_SAMPLERATE,
+            quad_rate=FM_QUAD_RATE,
             tau=75e-6,
             max_dev=self._deviation_hz,
           )
@@ -258,7 +255,7 @@ class ChannelBlock_FM(gr.hier_block2):
             1,
             firdes.band_pass(
                 1,
-                audioSampleRate,
+                AUDIO_SAMPLERATE,
                 200,
                 3500,
                 100,
@@ -323,7 +320,7 @@ class ChannelBlock_AM(gr.hier_block2):
 
     FIXED_AUDIO_GAIN_FACTOR = 3
 
-    def __init__(self, channelId, label: str, channelFreq_hz: int, hardwareFreq_hz: int, audioGain_dB: float, squelchThreshold: float, dwellTime_s: float, audioSampleRate, rfSampleRate):
+    def __init__(self, channelId, label: str, channelFreq_hz: int, hardwareFreq_hz: int, audioGain_dB: float, squelchThreshold: float, dwellTime_s: float, rfSampleRate):
         gr.hier_block2.__init__(
             self, "AM_Channel",
                 gr.io_signature(1, 1, gr.sizeof_gr_complex*1),
@@ -346,10 +343,9 @@ class ChannelBlock_AM(gr.hier_block2):
         ##################################################
         # Parameters
         ##################################################
-        self.audioSampleRate = audioSampleRate
         self.rfSampleRate = rfSampleRate
 
-        inputDecimation = self.rfSampleRate // self.audioSampleRate
+        inputDecimation = self.rfSampleRate // AUDIO_SAMPLERATE
 
         intermediateDecimation, xlatDecimation = _filterDec(inputDecimation)
 
@@ -378,7 +374,7 @@ class ChannelBlock_AM(gr.hier_block2):
 
         else:
             self.blockFreqXlatingFilter = gr_filter.freq_xlating_fir_filter_ccc(
-                int(self.rfSampleRate/self.audioSampleRate),
+                int(self.rfSampleRate/AUDIO_SAMPLERATE),
                 firdes.low_pass(1.0, self.rfSampleRate, 4000, 2000),
                 freqOffset_Hz,
                 self.rfSampleRate
@@ -394,7 +390,7 @@ class ChannelBlock_AM(gr.hier_block2):
             False
         )
 
-        self.blockAnalogAgc = analog.feedforward_agc_cc(int(self.audioSampleRate * 0.2), 0.5)
+        self.blockAnalogAgc = analog.feedforward_agc_cc(int(AUDIO_SAMPLERATE * 0.2), 0.5)
 
         self.blockAnalogAMDemod = blocks.complex_to_mag(1)
 
@@ -405,7 +401,7 @@ class ChannelBlock_AM(gr.hier_block2):
             1,
             firdes.band_pass(
                 1,
-                self.audioSampleRate,
+                AUDIO_SAMPLERATE,
                 200,
                 3500,
                 100,

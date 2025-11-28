@@ -8,13 +8,12 @@ from .Channel import ChannelConfig, ChannelStatus, Channel
 
 
 class ScanWindowConfig():
-    def __init__(self, hardwareFreq_hz: int, rfSampleRate: int, audioSampleRate: int, channelConfigs: List[ChannelConfig]):
+    def __init__(self, hardwareFreq_hz: int, rfSampleRate: int, channelConfigs: List[ChannelConfig]):
 
         self.id = uuid.uuid4()
 
         self.hardwareFreq_hz = hardwareFreq_hz
         self.rfSampleRate = rfSampleRate
-        self.audioSampleRate = audioSampleRate
         self.channelConfigs = channelConfigs
 
 
@@ -23,15 +22,13 @@ class ScanWindow():
     This object runs on the Receiver, built from the Config object
     """
 
-    def __init__(self, swId, hardwareFreq_hz: int, rfSampleRate: int, audioSampleRate: int, channels: List[Channel]):
+    def __init__(self, swId, hardwareFreq_hz: int, rfSampleRate: int, channels: List[Channel]):
 
         self.id = swId
 
         self.hardwareFreq_hz = hardwareFreq_hz
         self.rfSampleRate = rfSampleRate
         self.channels = channels
-        self.audioSampleRate = audioSampleRate
-
 
         # ScanWindowBlock that plugs into the radios
         self.scanWindowBlock = ScanWindowBlock(
@@ -49,7 +46,6 @@ class ScanWindow():
             swc.id,
             hardwareFreq_hz=swc.hardwareFreq_hz,
             rfSampleRate=swc.rfSampleRate,
-            audioSampleRate=swc.audioSampleRate,
             channels=channels
         )
         return sw

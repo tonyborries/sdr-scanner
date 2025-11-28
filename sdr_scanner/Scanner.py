@@ -3,12 +3,9 @@ import time
 from typing import List
 import yaml
 
-from sdr_scanner.Channel import ChannelConfig
-from sdr_scanner.Receiver import ReceiverConfig, runAsProcess
-from sdr_scanner.ScanWindow import ScanWindowConfig
-
-
-AUDIO_SAMPLERATE = 16000
+from .Channel import ChannelConfig
+from .Receiver import ReceiverConfig, runAsProcess
+from .ScanWindow import ScanWindowConfig
 
 
 class Scanner():
@@ -47,7 +44,7 @@ class Scanner():
             for rx in configDict['receivers']:
                 rxTypeStr = rx['type']
                 del rx['type']
-                rxConfig = ReceiverConfig(rxTypeStr, rx, AUDIO_SAMPLERATE)
+                rxConfig = ReceiverConfig(rxTypeStr, rx)
                 scanner.receiverConfigs.append(rxConfig)
 
             ###
@@ -119,7 +116,7 @@ class Scanner():
             ccs = [cc for cc in self.channelConfigs if cc.freq_hz >= lowFreq and cc.freq_hz <= highFreq]
             for cc in ccs:
                 freqsToAllocate.remove(cc.freq_hz)
-            swc = ScanWindowConfig(hardwareFreq, bandwidth, AUDIO_SAMPLERATE, ccs)
+            swc = ScanWindowConfig(hardwareFreq, bandwidth, ccs)
             self.scanWindowConfigs.append(swc)
 
     def processReceiverMsg(self, receiverId, msg):
