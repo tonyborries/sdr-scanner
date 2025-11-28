@@ -17,8 +17,6 @@ This is in a working but early stage.
 
 Currently only support for RTL-SDR radios is enabled.
 
-Only FM demodulation currently supported.
-
 
 Architecture Overview
 =====================
@@ -64,7 +62,7 @@ Channels are defined as entries under the 'channels' key, with the following key
 
 - freq: (Required) Frequency in MHz.
 - label: (Optional) Text label used when displaying the channel.
-- mode: (Optional, default FM)
+- mode: (Optional, default FM) FM, NFM, AM
 - audioGain_dB: (Optional, default 0.0) Gain applied to the demodulated audio
 - dwellTime_s: (Optional) Overrides the time spent monitoring the Channel after the last received activity.
 - squelchThreshold: (Optional) Overrides the default squelch threshold.
@@ -138,6 +136,12 @@ The interface display recently active channels. The background color indicates:
 Channel Modes
 =============
 
+Supported Modes:
+
+- AM
+- FM
+- NFM
+
 FM / NFM
 --------
 
@@ -171,8 +175,7 @@ My non-committal TODO list:
 
 - **General GUI Enhancement**
 - **Additional Receiver Models**
-- **Additional Demodulation Modes** - AM / SSB are priority, maybe incorporate digital voice.
-- **RSSI Monitoring**
+- **Additional Demodulation Modes** - SSB, maybe incorporate digital voice.
 - **Priority Channel Support** - Higher priority Channels preempt others by muting them or lowering
   their volume.
 - **Automatic Adaptive Squelch**

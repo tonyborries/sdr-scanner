@@ -90,7 +90,6 @@ class RSSIDisplayPanelManager(BasePanelManager):
         )
         font = self.stLabel.GetFont()
         font.PointSize -= 2
-        font = font.Bold()
         self.stLabel.SetFont(font)
         sizer.Add(self.stLabel, 0, wx.ALIGN_BOTTOM, 0)
 
