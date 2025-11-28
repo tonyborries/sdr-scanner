@@ -132,6 +132,9 @@ The interface display recently active channels. The background color indicates:
 - **Yellow:** Recently active, Dwelling on the Channel.
 - **Grey:** Recently active, scanning has resumed.
 
+The Signal Strength bars indicate the signal strength above the Channel's Squelch Threshold. Each bar
+is 10 dB, so the first bar indicates 0-10dB above the squelch, the second 10-20dB, etc...
+
 
 Channel Modes
 =============

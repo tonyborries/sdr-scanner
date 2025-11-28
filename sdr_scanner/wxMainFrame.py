@@ -98,26 +98,32 @@ class RSSIDisplayPanelManager(BasePanelManager):
         self.meterPanel.Bind(wx.EVT_PAINT, self.OnPaint)
 
         self.rssi_dBFS = -999
+        self.rssiOverThreshold = -999
 
     def OnPaint(self, event):
         # Create a Device Context (DC) for painting the panel
         dc = wx.PaintDC(self.meterPanel)
 
         dc.SetPen(wx.Pen('black', 1, wx.SOLID))
-        dc.SetBrush(wx.Brush('black', wx.SOLID))
 
         i = 0
-        for db in [-90, -75, -65, -50]:
-            if self.rssi_dBFS > db:
-                x1 = (self.BAR_WIDTH + self.BAR_SPACING) * i
-                x2 = self.BAR_WIDTH
-                y1 = self.BAR_HEIGHT_STEP * (4-i)
-                y2 = self.BAR_HEIGHT_STEP * (i+1)
-                dc.DrawRectangle(x1, y1, x2, y2)
+        for db in [0, 10, 20, 30]:
+            if self.rssiOverThreshold > db:
+                dc.SetBrush(wx.Brush('black', wx.SOLID))
+            else:
+                dc.SetBrush(wx.Brush('black', wx.BRUSHSTYLE_TRANSPARENT))
+
+            x1 = (self.BAR_WIDTH + self.BAR_SPACING) * i
+            x2 = self.BAR_WIDTH
+            y1 = self.BAR_HEIGHT_STEP * (4-i)
+            y2 = self.BAR_HEIGHT_STEP * (i+1)
+            dc.DrawRectangle(x1, y1, x2, y2)
+
             i += 1
 
-    def setRSSI(self, rssi: float):
+    def setRSSI(self, rssi: float, rssiOverThreshold: float):
         self.rssi_dBFS = rssi
+        self.rssiOverThreshold = rssiOverThreshold
         self.stLabel.SetLabel(f"dBFS: {self.rssi_dBFS:4.0f}")
         self.meterPanel.Refresh()
 
@@ -134,6 +140,8 @@ class ChannelStripPanelManager(BasePanelManager):
         self.panel = wx.Panel(parentPanel)
 
         sizer = wx.BoxSizer(wx.HORIZONTAL)
+
+        self.channelConfig = channelConfig
 
         ###
         # Label
@@ -173,7 +181,8 @@ class ChannelStripPanelManager(BasePanelManager):
         self._isHidden = False
 
     def setRSSI(self, rssi: float):
-        self.rssiPM.setRSSI(rssi)
+        rssiOverThreshold = rssi - self.channelConfig.squelchThreshold
+        self.rssiPM.setRSSI(rssi, rssiOverThreshold)
 
     def setChannelStatus(self, status: ChannelStatus):
         bgColor = wx.Colour(192, 192, 192)  # IDLE
