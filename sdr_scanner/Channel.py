@@ -1,5 +1,6 @@
 from enum import IntEnum
 import math
+import numpy as np
 import time
 from typing import Any, Dict, List, Optional
 import uuid
@@ -11,7 +12,7 @@ from gnuradio.filter import firdes
 from gnuradio import gr
 from gnuradio.fft import window
 
-from .const import AUDIO_SAMPLERATE, FM_QUAD_RATE
+from .const import AUDIO_SAMPLERATE, FM_QUAD_RATE, RSSI_LOWPASS_TC, RSSI_UPDATE_FREQ_HZ, STATUS_UPDATE_TIME_S
 
 
 class ChannelStatus(IntEnum):
@@ -39,6 +40,22 @@ def _filterDec(x):
             return n, x // n
         n -= 1
     return 1, x
+
+class RSSI_EmbeddedPythonBlock(gr.sync_block):
+
+    def __init__(self, rssiCb):
+        gr.sync_block.__init__(
+            self,
+            name='RSSI Embedded Python Block',   # will show up in GRC
+            in_sig=[np.float32],
+            out_sig=[]
+        )
+        self.rssiCb = rssiCb
+
+    def work(self, input_items, output_items):
+        dBFS = 10 * math.log10(input_items[0][-1])
+        self.rssiCb(dBFS)
+        return 0
 
 
 class ChannelConfig():
@@ -183,8 +200,11 @@ class ChannelBlock_FM(gr.hier_block2):
         self.squelchThreshold = squelchThreshold
 
         self._lastStatusReport = None
+        self._lastStatusTime = 0.0
 
         freqOffset_Hz = channelFreq_hz - hardwareFreq_hz
+
+        self._rssi = None
 
         ##################################################
         # Parameters
@@ -265,10 +285,22 @@ class ChannelBlock_FM(gr.hier_block2):
         )
         self.blockAudioGain = blocks.multiply_const_ff(self.audioGainFactor)
 
+        ###
+        # RSSI
+
+        self.blockRssiComplexToMag2 = blocks.complex_to_mag_squared(1)
+        self.blockRssiLowPassFilter = gr_filter.single_pole_iir_filter_ff( (1 / (FM_QUAD_RATE * 0.25)), 1)
+        self.blockRssiDecimate = blocks.keep_one_in_n(gr.sizeof_float*1, (FM_QUAD_RATE // RSSI_UPDATE_FREQ_HZ) )
+        self.blockRssi = RSSI_EmbeddedPythonBlock(self.updateRSSI)
+
 
         ##################################################
         # Connections
         ##################################################
+
+        ###
+        # RF Chain
+
         self.connect((self.blockAudioGain, 0), (self, 0))
         self.connect((self.blockAudioFilter, 0), (self.blockAudioGain, 0))
         self.connect((self.blockAnalogNbfmRx, 0), (self.blockAudioFilter, 0))
@@ -282,6 +314,18 @@ class ChannelBlock_FM(gr.hier_block2):
 
         self.connect((self, 0), (self.blockFreqXlatingFilter, 0))
 
+        ###
+        # RSSI Chain
+
+        self.connect((self.blockRssiDecimate, 0), (self.blockRssi, 0))
+        self.connect((self.blockRssiLowPassFilter, 0), (self.blockRssiDecimate, 0))
+        self.connect((self.blockRssiComplexToMag2, 0), (self.blockRssiLowPassFilter, 0))
+        if self.blockInputIntermediateFilter:
+            self.connect((self.blockInputIntermediateFilter, 0), (self.blockRssiComplexToMag2, 0))
+        else:
+            self.connect((self.blockFreqXlatingFilter, 0), (self.blockRssiComplexToMag2, 0))
+
+
     def setAudioGain(self, dB: float):
         self.audioGainFactor = dbToRatio(dB)
         self.blockAudioGain.set_k(self.audioGainFactor)
@@ -289,6 +333,12 @@ class ChannelBlock_FM(gr.hier_block2):
     def setSquelchValue(self, squelchThreshold):
         self.squelchThreshold = squelchThreshold
         self.blockAnalogPowerSquelch.set_threshold(squelchThreshold)
+
+    def updateRSSI(self, rssi: float):
+        """
+        rssi - dbFS
+        """
+        self._rssi = rssi
 
     def getStatus(self, statusPipe):
         status = ChannelStatus.IDLE
@@ -301,7 +351,8 @@ class ChannelBlock_FM(gr.hier_block2):
             if time.time() - self._lastActive < self._dwellTime:
                 status = ChannelStatus.DWELL
 
-        if status != self._lastStatusReport:
+        if status != self._lastStatusReport or (status != ChannelStatus.IDLE and (time.time() - self._lastStatusTime) > STATUS_UPDATE_TIME_S):
+            self._lastStatusTime = time.time()
             self._lastStatusReport = status
             if statusPipe:
                 statusPipe.send([{
@@ -309,7 +360,7 @@ class ChannelBlock_FM(gr.hier_block2):
                     'data': {
                         'id': self.channelId,
                         'status': status,
-                        # 'rssi': <RSSI>
+                         'rssi': self._rssi,
                     }
                 }])
 
@@ -337,8 +388,11 @@ class ChannelBlock_AM(gr.hier_block2):
         self.squelchThreshold = squelchThreshold
 
         self._lastStatusReport = None
+        self._lastStatusTime = 0.0
 
         freqOffset_Hz = channelFreq_hz - hardwareFreq_hz
+
+        self._rssi = None
 
         ##################################################
         # Parameters
@@ -411,9 +465,21 @@ class ChannelBlock_AM(gr.hier_block2):
         )
         self.blockAudioGain = blocks.multiply_const_ff(self.audioGainFactor)
 
+        ###
+        # RSSI
+
+        self.blockRssiComplexToMag2 = blocks.complex_to_mag_squared(1)
+        self.blockRssiLowPassFilter = gr_filter.single_pole_iir_filter_ff( (1 / (AUDIO_SAMPLERATE * 0.25)), 1)
+        self.blockRssiDecimate = blocks.keep_one_in_n(gr.sizeof_float*1, (AUDIO_SAMPLERATE // RSSI_UPDATE_FREQ_HZ) )
+        self.blockRssi = RSSI_EmbeddedPythonBlock(self.updateRSSI)
+
+
         ##################################################
         # Connections
         ##################################################
+
+        ###
+        # RF Chain
 
         self.connect((self.blockAudioGain, 0), (self, 0))
         self.connect((self.blockAudioFilter, 0), (self.blockAudioGain, 0))
@@ -430,6 +496,18 @@ class ChannelBlock_AM(gr.hier_block2):
 
         self.connect((self, 0), (self.blockFreqXlatingFilter, 0))
 
+        ###
+        # RSSI Chain
+
+        self.connect((self.blockRssiDecimate, 0), (self.blockRssi, 0))
+        self.connect((self.blockRssiLowPassFilter, 0), (self.blockRssiDecimate, 0))
+        self.connect((self.blockRssiComplexToMag2, 0), (self.blockRssiLowPassFilter, 0))
+        if self.blockInputIntermediateFilter:
+            self.connect((self.blockInputIntermediateFilter, 0), (self.blockRssiComplexToMag2, 0))
+        else:
+            self.connect((self.blockFreqXlatingFilter, 0), (self.blockRssiComplexToMag2, 0))
+
+
     def setAudioGain(self, dB: float):
         self.audioGainFactor = dbToRatio(dB)
         self.blockAudioGain.set_k(self.audioGainFactor * self.FIXED_AUDIO_GAIN_FACTOR)
@@ -437,6 +515,12 @@ class ChannelBlock_AM(gr.hier_block2):
     def setSquelchValue(self, squelchThreshold):
         self.squelchThreshold = squelchThreshold
         self.blockAnalogPowerSquelch.set_threshold(squelchThreshold)
+
+    def updateRSSI(self, rssi: float):
+        """
+        rssi - dbFS
+        """
+        self._rssi = rssi
 
     def getStatus(self, statusPipe):
         status = ChannelStatus.IDLE
@@ -449,7 +533,8 @@ class ChannelBlock_AM(gr.hier_block2):
             if time.time() - self._lastActive < self._dwellTime:
                 status = ChannelStatus.DWELL
 
-        if status != self._lastStatusReport:
+        if status != self._lastStatusReport or (status != ChannelStatus.IDLE and (time.time() - self._lastStatusTime) > STATUS_UPDATE_TIME_S):
+            self._lastStatusTime = time.time()
             self._lastStatusReport = status
             if statusPipe:
                 statusPipe.send([{
@@ -457,7 +542,7 @@ class ChannelBlock_AM(gr.hier_block2):
                     'data': {
                         'id': self.channelId,
                         'status': status,
-                        # 'rssi': <RSSI>
+                        'rssi': self._rssi,
                     }
                 }])
 

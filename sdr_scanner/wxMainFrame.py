@@ -65,6 +65,64 @@ class BasePanelManager():
         return self.panel
 
 
+class RSSIDisplayPanelManager(BasePanelManager):
+    BAR_WIDTH = 5
+    BAR_SPACING = 3
+    BAR_HEIGHT_STEP = 5
+
+    LABEL_WIDTH = 70
+
+
+    def __init__(self, parentPanel):
+        self.parentPanel = parentPanel
+        self.panel = wx.Panel(parentPanel)
+
+        sizer = wx.BoxSizer(wx.HORIZONTAL)
+
+        meterPanelWidth = self.BAR_WIDTH * 4 + self.BAR_SPACING * 3
+        self.meterPanel = wx.Panel(self.panel, size=(meterPanelWidth, self.BAR_HEIGHT_STEP * 5))
+        sizer.Add(self.meterPanel, 0, wx.FIXED_MINSIZE | wx.ALL, 2)
+
+        self.stLabel = wx.StaticText(
+            self.panel,
+            label=f"dBFS",
+            size=(self.LABEL_WIDTH, -1)
+        )
+        font = self.stLabel.GetFont()
+        font.PointSize -= 2
+        font = font.Bold()
+        self.stLabel.SetFont(font)
+        sizer.Add(self.stLabel, 0, wx.ALIGN_BOTTOM, 0)
+
+        self.panel.SetSizer(sizer)
+
+        self.meterPanel.Bind(wx.EVT_PAINT, self.OnPaint)
+
+        self.rssi_dBFS = -999
+
+    def OnPaint(self, event):
+        # Create a Device Context (DC) for painting the panel
+        dc = wx.PaintDC(self.meterPanel)
+
+        dc.SetPen(wx.Pen('black', 1, wx.SOLID))
+        dc.SetBrush(wx.Brush('black', wx.SOLID))
+
+        i = 0
+        for db in [-90, -75, -65, -50]:
+            if self.rssi_dBFS > db:
+                x1 = (self.BAR_WIDTH + self.BAR_SPACING) * i
+                x2 = self.BAR_WIDTH
+                y1 = self.BAR_HEIGHT_STEP * (4-i)
+                y2 = self.BAR_HEIGHT_STEP * (i+1)
+                dc.DrawRectangle(x1, y1, x2, y2)
+            i += 1
+
+    def setRSSI(self, rssi: float):
+        self.rssi_dBFS = rssi
+        self.stLabel.SetLabel(f"dBFS: {self.rssi_dBFS:4.0f}")
+        self.meterPanel.Refresh()
+
+
 class ChannelStripPanelManager(BasePanelManager):
 
     LABEL_WIDTH = 250
@@ -104,11 +162,19 @@ class ChannelStripPanelManager(BasePanelManager):
 
         sizer.Add(labelSizer, 0, 0, 0)
 
+        # RSSI
+        self.rssiPM = RSSIDisplayPanelManager(self.panel)
+        sizer.Add(self.rssiPM.getPanel(), 0, wx.RESERVE_SPACE_EVEN_IF_HIDDEN, 0)
+
+
         self.panel.SetSizer(sizer)
 
         self._lastActive = 0.0
         self._lastStatus: Optional[ChannelStatus] = None
         self._isHidden = False
+
+    def setRSSI(self, rssi: float):
+        self.rssiPM.setRSSI(rssi)
 
     def setChannelStatus(self, status: ChannelStatus):
         bgColor = wx.Colour(192, 192, 192)  # IDLE
@@ -120,13 +186,16 @@ class ChannelStripPanelManager(BasePanelManager):
             bgColor = wx.Colour(192, 192, 0)
 
         if status != self._lastStatus:
+            if status == ChannelStatus.ACTIVE:
+                self.rssiPM.getPanel().Show()
+            else:
+                self.rssiPM.getPanel().Hide()
             self.panel.SetBackgroundColour(bgColor)
             self._lastStatus = status
             self.panel.Refresh()
             self.updateHiddenStatus()
 
     def updateHiddenStatus(self):
-#        shouldHide = False
         shouldHide = time.time() - self._lastActive > self.DISPLAY_TIMEOUT_S
         if shouldHide != self._isHidden:
             self._isHidden = shouldHide
@@ -167,6 +236,13 @@ class ActiveChannelPanelManager(BasePanelManager):
             sizer.Add(cspm.getPanel(), 0, 0, 0)
 
         self.panel.SetSizer(sizer)
+
+    def setChannelRSSI(self, channelId, rssi: float):
+        cspm = self.channelStripPanelManagersById.get(channelId)
+        if not cspm:
+            print("*** CHANNEL NOT FOUND - ActiveChannelPanelManager")
+            return
+        cspm.setRSSI(rssi)
 
     def setChannelStatus(self, channelId, status: ChannelStatus):
         cspm = self.channelStripPanelManagersById.get(channelId)
@@ -246,6 +322,11 @@ class MainFrame(wx.Frame):
 
     def channelStatusCb(self, data):
         print(data)
+
+        rssi = data.get('rssi')
+        if rssi is not None:
+            self.activeChannelPanelManager.setChannelRSSI(data['id'], rssi)
+
         if data['status'] == ChannelStatus.ACTIVE:
             channel = self._scanner.getChannelById(data['id'])
             if channel:

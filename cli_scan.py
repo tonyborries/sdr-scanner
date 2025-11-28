@@ -22,6 +22,8 @@ def main():
     ###
     # Setup Status Callbacks
 
+    lastChannelStatusById = {}
+
     def scanWindowStartCb(scanWindowId, rxId):
 #        print(f"Scan Window {scanWindowId} on {rxId}")
         pass
@@ -33,9 +35,13 @@ def main():
             print('', end='\r')
 
     def channelStatusCb(data):
-        if data['status'] == 1:
-            channel = scanner.getChannelById(data['id'])
+        status = data['status']
+        channelId = data['id']
+        lastStatus = lastChannelStatusById.get(channelId)
+        if status == 1 and lastStatus != status:
+            channel = scanner.getChannelById(channelId)
             print(f"\n {datetime.datetime.now().time().isoformat()[0:8]}  {channel.label} ({channel.freq_hz/1e6})")
+        lastChannelStatusById[channelId] = status
 
     scanner.addChannelStatusCb(channelStatusCb)
     scanner.addScanWindowStartCb(scanWindowStartCb)
