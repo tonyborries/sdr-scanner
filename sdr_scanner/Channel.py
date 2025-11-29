@@ -12,7 +12,14 @@ from gnuradio.filter import firdes
 from gnuradio import gr
 from gnuradio.fft import window
 
-from .const import AUDIO_SAMPLERATE, FM_QUAD_RATE, RSSI_LOWPASS_TC, RSSI_UPDATE_FREQ_HZ, STATUS_UPDATE_TIME_S
+from .const import (
+    AUDIO_SAMPLERATE,
+    FM_QUAD_RATE,
+    NOISEFLOOR_LOWPASS_A,
+    RSSI_LOWPASS_TC,
+    RSSI_UPDATE_FREQ_HZ,
+    STATUS_UPDATE_TIME_S
+)
 
 
 class ChannelStatus(IntEnum):
@@ -55,7 +62,7 @@ class RSSI_EmbeddedPythonBlock(gr.sync_block):
     def work(self, input_items, output_items):
         dBFS = 10 * math.log10(input_items[0][-1])
         self.rssiCb(dBFS)
-        return 0
+        return len(input_items[0])
 
 
 class ChannelConfig():
@@ -180,31 +187,48 @@ class Channel():
     def getStatus(self, statusPipe):
         return self.channelBlock.getStatus(statusPipe)
 
+class ChannelBlock_Base(gr.hier_block2):
 
-class ChannelBlock_FM(gr.hier_block2):
-    def __init__(self, channelId, label: str, channelFreq_hz: int, hardwareFreq_hz: int, deviation_hz: int, audioGain_dB: float, squelchThreshold: float, dwellTime_s: float, rfSampleRate):
+    def __init__(self):
         gr.hier_block2.__init__(
-            self, "FM_Channel",
+            self, "_Channel",
                 gr.io_signature(1, 1, gr.sizeof_gr_complex*1),
                 gr.io_signature(1, 1, gr.sizeof_float*1),
         )
+
+        self._active = False
+        self._lastActive = 0
+        self._lastStatusReport = None
+        self._lastStatusTime = 0.0
+
+        self._rssi = None
+        self._noiseFloor_dBFS = None
+
+    def updateRSSI(self, rssi: float):
+        """
+        rssi - dbFS
+        """
+        self._rssi = rssi
+        if not self._active:
+            if self._noiseFloor_dBFS is None:
+                self._noiseFloor_dBFS = rssi
+            else:
+                self._noiseFloor_dBFS = (NOISEFLOOR_LOWPASS_A * rssi) + ((1 - NOISEFLOOR_LOWPASS_A) * self._noiseFloor_dBFS)
+
+
+class ChannelBlock_FM(ChannelBlock_Base):
+    def __init__(self, channelId, label: str, channelFreq_hz: int, hardwareFreq_hz: int, deviation_hz: int, audioGain_dB: float, squelchThreshold: float, dwellTime_s: float, rfSampleRate):
+        super().__init__()
 
         self.channelId = channelId
 
         self._label = label
         self._deviation_hz = deviation_hz
-        self._lastActive = 0
-        self._active = False
         self._dwellTime = dwellTime_s
         self.audioGainFactor = dbToRatio(audioGain_dB)
         self.squelchThreshold = squelchThreshold
 
-        self._lastStatusReport = None
-        self._lastStatusTime = 0.0
-
         freqOffset_Hz = channelFreq_hz - hardwareFreq_hz
-
-        self._rssi = None
 
         ##################################################
         # Parameters
@@ -289,7 +313,7 @@ class ChannelBlock_FM(gr.hier_block2):
         # RSSI
 
         self.blockRssiComplexToMag2 = blocks.complex_to_mag_squared(1)
-        self.blockRssiLowPassFilter = gr_filter.single_pole_iir_filter_ff( (1 / (FM_QUAD_RATE * 0.25)), 1)
+        self.blockRssiLowPassFilter = gr_filter.single_pole_iir_filter_ff( (1 / (FM_QUAD_RATE * RSSI_LOWPASS_TC)), 1)
         self.blockRssiDecimate = blocks.keep_one_in_n(gr.sizeof_float*1, (FM_QUAD_RATE // RSSI_UPDATE_FREQ_HZ) )
         self.blockRssi = RSSI_EmbeddedPythonBlock(self.updateRSSI)
 
@@ -334,12 +358,6 @@ class ChannelBlock_FM(gr.hier_block2):
         self.squelchThreshold = squelchThreshold
         self.blockAnalogPowerSquelch.set_threshold(squelchThreshold)
 
-    def updateRSSI(self, rssi: float):
-        """
-        rssi - dbFS
-        """
-        self._rssi = rssi
-
     def getStatus(self, statusPipe):
         status = ChannelStatus.IDLE
         if self.blockAnalogPowerSquelch.unmuted():
@@ -361,38 +379,28 @@ class ChannelBlock_FM(gr.hier_block2):
                         'id': self.channelId,
                         'status': status,
                          'rssi': self._rssi,
+                         'noiseFloor': self._noiseFloor_dBFS,
                     }
                 }])
 
         return status
 
 
-class ChannelBlock_AM(gr.hier_block2):
+class ChannelBlock_AM(ChannelBlock_Base):
 
     FIXED_AUDIO_GAIN_FACTOR = 3
 
     def __init__(self, channelId, label: str, channelFreq_hz: int, hardwareFreq_hz: int, audioGain_dB: float, squelchThreshold: float, dwellTime_s: float, rfSampleRate):
-        gr.hier_block2.__init__(
-            self, "AM_Channel",
-                gr.io_signature(1, 1, gr.sizeof_gr_complex*1),
-                gr.io_signature(1, 1, gr.sizeof_float*1),
-        )
+        super().__init__()
 
         self.channelId = channelId
 
         self._label = label
-        self._lastActive = 0
-        self._active = False
         self._dwellTime = dwellTime_s
         self.audioGainFactor = dbToRatio(audioGain_dB) * self.FIXED_AUDIO_GAIN_FACTOR
         self.squelchThreshold = squelchThreshold
 
-        self._lastStatusReport = None
-        self._lastStatusTime = 0.0
-
         freqOffset_Hz = channelFreq_hz - hardwareFreq_hz
-
-        self._rssi = None
 
         ##################################################
         # Parameters
@@ -469,7 +477,7 @@ class ChannelBlock_AM(gr.hier_block2):
         # RSSI
 
         self.blockRssiComplexToMag2 = blocks.complex_to_mag_squared(1)
-        self.blockRssiLowPassFilter = gr_filter.single_pole_iir_filter_ff( (1 / (AUDIO_SAMPLERATE * 0.25)), 1)
+        self.blockRssiLowPassFilter = gr_filter.single_pole_iir_filter_ff( (1 / (AUDIO_SAMPLERATE * RSSI_LOWPASS_TC)), 1)
         self.blockRssiDecimate = blocks.keep_one_in_n(gr.sizeof_float*1, (AUDIO_SAMPLERATE // RSSI_UPDATE_FREQ_HZ) )
         self.blockRssi = RSSI_EmbeddedPythonBlock(self.updateRSSI)
 
@@ -516,12 +524,6 @@ class ChannelBlock_AM(gr.hier_block2):
         self.squelchThreshold = squelchThreshold
         self.blockAnalogPowerSquelch.set_threshold(squelchThreshold)
 
-    def updateRSSI(self, rssi: float):
-        """
-        rssi - dbFS
-        """
-        self._rssi = rssi
-
     def getStatus(self, statusPipe):
         status = ChannelStatus.IDLE
         if self.blockAnalogPowerSquelch.unmuted():
@@ -543,6 +545,7 @@ class ChannelBlock_AM(gr.hier_block2):
                         'id': self.channelId,
                         'status': status,
                         'rssi': self._rssi,
+                         'noiseFloor': self._noiseFloor_dBFS,
                     }
                 }])
 

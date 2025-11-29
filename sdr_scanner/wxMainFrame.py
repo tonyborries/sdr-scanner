@@ -71,27 +71,49 @@ class RSSIDisplayPanelManager(BasePanelManager):
     BAR_HEIGHT_STEP = 5
 
     LABEL_WIDTH = 70
+    NOISEFLOOR_LABEL_WIDTH = LABEL_WIDTH + BAR_WIDTH * 4 + BAR_SPACING * 3
 
 
     def __init__(self, parentPanel):
         self.parentPanel = parentPanel
         self.panel = wx.Panel(parentPanel)
 
-        sizer = wx.BoxSizer(wx.HORIZONTAL)
+        sizer = wx.BoxSizer(wx.VERTICAL)
+
+        ###
+        # RSSI Bars and Text
+
+        rssiSizer = wx.BoxSizer(wx.HORIZONTAL)
 
         meterPanelWidth = self.BAR_WIDTH * 4 + self.BAR_SPACING * 3
         self.meterPanel = wx.Panel(self.panel, size=(meterPanelWidth, self.BAR_HEIGHT_STEP * 5))
-        sizer.Add(self.meterPanel, 0, wx.FIXED_MINSIZE | wx.ALL, 2)
+        rssiSizer.Add(self.meterPanel, 0, wx.FIXED_MINSIZE | wx.ALL, 2)
 
         self.stLabel = wx.StaticText(
             self.panel,
-            label=f"dBFS",
+            label=f"",
             size=(self.LABEL_WIDTH, -1)
         )
         font = self.stLabel.GetFont()
         font.PointSize -= 2
         self.stLabel.SetFont(font)
-        sizer.Add(self.stLabel, 0, wx.ALIGN_BOTTOM, 0)
+        rssiSizer.Add(self.stLabel, 0, wx.ALIGN_BOTTOM, 0)
+
+        sizer.Add(rssiSizer, 0, 0, 0)
+
+        ###
+        # Noise Floor Text
+
+        self.stNoiseFloor = wx.StaticText(
+            self.panel,
+            label=f"",
+            size=(self.NOISEFLOOR_LABEL_WIDTH, -1)
+        )
+        font = self.stNoiseFloor.GetFont()
+        font.PointSize -= 2
+        self.stNoiseFloor.SetFont(font)
+        sizer.Add(self.stNoiseFloor, 0, 0, 0)
+
 
         self.panel.SetSizer(sizer)
 
@@ -121,10 +143,15 @@ class RSSIDisplayPanelManager(BasePanelManager):
 
             i += 1
 
-    def setRSSI(self, rssi: float, rssiOverThreshold: float):
+    def setRSSI(self, rssi: float, rssiOverThreshold: float, noiseFloor: Optional[float]):
         self.rssi_dBFS = rssi
         self.rssiOverThreshold = rssiOverThreshold
-        self.stLabel.SetLabel(f"dBFS: {self.rssi_dBFS:4.0f}")
+        self.noiseFloor_dBFS = noiseFloor
+        self.stLabel.SetLabel(f"{self.rssi_dBFS:4.0f} dBFS")
+        if noiseFloor is None:
+            self.stNoiseFloor.SetLabel('')
+        else:
+            self.stNoiseFloor.SetLabel(f"Noise: {self.noiseFloor_dBFS:4.0f} dBFS")
         self.meterPanel.Refresh()
 
 
@@ -180,9 +207,9 @@ class ChannelStripPanelManager(BasePanelManager):
         self._lastStatus: Optional[ChannelStatus] = None
         self._isHidden = False
 
-    def setRSSI(self, rssi: float):
+    def setRSSI(self, rssi: float, noiseFloor: Optional[float]):
         rssiOverThreshold = rssi - self.channelConfig.squelchThreshold
-        self.rssiPM.setRSSI(rssi, rssiOverThreshold)
+        self.rssiPM.setRSSI(rssi, rssiOverThreshold, noiseFloor)
 
     def setChannelStatus(self, status: ChannelStatus):
         bgColor = wx.Colour(192, 192, 192)  # IDLE
@@ -194,10 +221,6 @@ class ChannelStripPanelManager(BasePanelManager):
             bgColor = wx.Colour(192, 192, 0)
 
         if status != self._lastStatus:
-            if status == ChannelStatus.ACTIVE:
-                self.rssiPM.getPanel().Show()
-            else:
-                self.rssiPM.getPanel().Hide()
             self.panel.SetBackgroundColour(bgColor)
             self._lastStatus = status
             self.panel.Refresh()
@@ -245,12 +268,12 @@ class ActiveChannelPanelManager(BasePanelManager):
 
         self.panel.SetSizer(sizer)
 
-    def setChannelRSSI(self, channelId, rssi: float):
+    def setChannelRSSI(self, channelId, rssi: float, noiseFloor: Optional[float]):
         cspm = self.channelStripPanelManagersById.get(channelId)
         if not cspm:
             print("*** CHANNEL NOT FOUND - ActiveChannelPanelManager")
             return
-        cspm.setRSSI(rssi)
+        cspm.setRSSI(rssi, noiseFloor)
 
     def setChannelStatus(self, channelId, status: ChannelStatus):
         cspm = self.channelStripPanelManagersById.get(channelId)
@@ -332,8 +355,9 @@ class MainFrame(wx.Frame):
         print(data)
 
         rssi = data.get('rssi')
+        noiseFloor = data.get('noiseFloor')
         if rssi is not None:
-            self.activeChannelPanelManager.setChannelRSSI(data['id'], rssi)
+            self.activeChannelPanelManager.setChannelRSSI(data['id'], rssi, noiseFloor)
 
         if data['status'] == ChannelStatus.ACTIVE:
             channel = self._scanner.getChannelById(data['id'])

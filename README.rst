@@ -135,6 +135,9 @@ The interface display recently active channels. The background color indicates:
 The Signal Strength bars indicate the signal strength above the Channel's Squelch Threshold. Each bar
 is 10 dB, so the first bar indicates 0-10dB above the squelch, the second 10-20dB, etc...
 
+The Noise Floor indication uses a long running average - since the Channels are scanned for only brief
+periods, it may take a while for this value to stabilize. (Currently uses a 60 second time constant,
+but may tune this in the future.)
 
 Channel Modes
 =============
