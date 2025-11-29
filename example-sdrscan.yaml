@@ -1,3 +1,6 @@
+scanner:
+  maxChannelsPerWindow: 16
+
 receivers:
   - type: RTL-SDR
 

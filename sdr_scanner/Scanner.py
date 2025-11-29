@@ -29,6 +29,8 @@ class Scanner():
         self._scanWindowStartCallbacks = []
         self._scanWindowDoneCallbacks = []
 
+        self.maxChannelsPerWindow = 16
+
         self._stopFlag = False
 
     @classmethod
@@ -37,6 +39,13 @@ class Scanner():
             configDict = yaml.safe_load(F_CONFIG)
 
             scanner = cls()
+
+            ###
+            # Scanner
+
+            scannerDict = configDict.get('scanner', {})
+            if 'maxChannelsPerWindow' in scannerDict:
+                scanner.maxChannelsPerWindow = scannerDict['maxChannelsPerWindow']
 
             ###
             # Receiver
@@ -114,10 +123,15 @@ class Scanner():
             highFreq = 2*hardwareFreq - lowFreq
 
             ccs = [cc for cc in self.channelConfigs if cc.freq_hz >= lowFreq and cc.freq_hz <= highFreq]
+            if len(ccs) > self.maxChannelsPerWindow:
+                ccs = sorted(ccs, key=lambda x: x.freq_hz)[0:self.maxChannelsPerWindow]
             for cc in ccs:
                 freqsToAllocate.remove(cc.freq_hz)
             swc = ScanWindowConfig(hardwareFreq, bandwidth, ccs)
             self.scanWindowConfigs.append(swc)
+
+        for swc in self.scanWindowConfigs:
+            swc.debugPrint()
 
     def processReceiverMsg(self, receiverId, msg):
         for item in msg:

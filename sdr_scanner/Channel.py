@@ -78,6 +78,9 @@ class ChannelConfig():
         self.audioGain_dB = audioGain_dB
         self.squelchThreshold = squelchThreshold
 
+    def debugPrint(self):
+        print(f"    {self.freq_hz / 1e6:6.3f} {self.mode.name} {self.label}")
+
     @staticmethod
     def modeStrLookup(modeStr: str) -> Optional[ChannelMode]:
         return {

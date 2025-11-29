@@ -35,6 +35,9 @@ Minimal Example
 
 ::
 
+    scanner:
+      maxChannelsPerWindow: 16
+
     receivers:
       - type: RTL-SDR
 
@@ -89,6 +92,13 @@ For RTL-SDR, Unique serial numbers must be assigned to each (see 'rtl_eeprom').
         deviceArg: serial=00000001
       - type: RTL-SDR
         deviceArg: serial=00000002
+
+Scanner Settings
+----------------
+
+- **maxChannelsPerWindow:** - Configures the number of Channels allowed per ScanWindow - if your CPU is
+  unable to keep up with the processing (audio dropouts / high latency / lagging UI), lower this to limit
+  the number of parallel Channels.
 
 
 Installation

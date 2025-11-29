@@ -16,6 +16,11 @@ class ScanWindowConfig():
         self.rfSampleRate = rfSampleRate
         self.channelConfigs = channelConfigs
 
+    def debugPrint(self):
+        print(f"== ScanWindow: {self.hardwareFreq_hz / 1e6:6.3f} {self.rfSampleRate} {self.id} ==")
+        for cc in sorted(self.channelConfigs, key=lambda x: x.freq_hz):
+            cc.debugPrint()
+
 
 class ScanWindow():
     """
