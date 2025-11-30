@@ -159,6 +159,7 @@ Supported Modes:
 - NFM
 - NOAA
 - BFM_EAS
+- USB / LSB
 
 FM / NFM
 --------
@@ -216,6 +217,13 @@ Example Config
 This mode scans Broadcast FM radio stations for the dual (853 / 960 Hz) EAS Alert Tones.
 Similar to the NOAA mode, this plays the Channel for the duration of the configured Dwell Time.
 
+Single Sideband
+---------------
+
+A simple sideband demodulator is provided, though given the simple squelching system currently used
+it may prove to be annoying for sustained use. My current use case is merely to monitor for activity then
+switch to a separate radio if interested.
+
 
 Future Work
 ===========
@@ -224,7 +232,6 @@ My non-committal TODO list:
 
 - **General GUI Enhancement**
 - **Additional Receiver Models**
-- **Additional Demodulation Modes** - SSB, maybe incorporate digital voice.
 - **Priority Channel Support** - Higher priority Channels preempt others by muting them or lowering
   their volume.
 - **Automatic Adaptive Squelch**

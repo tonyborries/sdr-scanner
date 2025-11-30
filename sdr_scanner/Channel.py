@@ -34,6 +34,8 @@ class ChannelMode(IntEnum):
     AM = 3
     NOAA_EAS = 4
     BFM_EAS = 5
+    USB = 6
+    LSB = 7
 
 
 def dbToRatio(dB: float) -> float:
@@ -92,6 +94,8 @@ class ChannelConfig():
             "AM": ChannelMode.AM,
             "NOAA": ChannelMode.NOAA_EAS,
             "BFM_EAS": ChannelMode.BFM_EAS,
+            'USB': ChannelMode.USB,
+            'LSB': ChannelMode.LSB,
         }.get(modeStr.upper())
 
     @classmethod
@@ -198,6 +202,31 @@ class Channel():
                 rfSampleRate=rfSampleRate,
                 alertTones=[853, 960],
             )
+        elif mode == ChannelMode.USB:
+            self.channelBlock = ChannelBlock_SSB(
+                self.id,
+                self.label,
+                self.freq_hz,
+                self.hardwareFreq_hz,
+                self.audioGain_dB,
+                self.squelchThreshold,
+                self.dwellTime_s,
+                rfSampleRate=rfSampleRate,
+                upperNotLowerSideband=True,
+            )
+        elif mode == ChannelMode.LSB:
+            self.channelBlock = ChannelBlock_SSB(
+                self.id,
+                self.label,
+                self.freq_hz,
+                self.hardwareFreq_hz,
+                self.audioGain_dB,
+                self.squelchThreshold,
+                self.dwellTime_s,
+                rfSampleRate=rfSampleRate,
+                upperNotLowerSideband=False,
+            )
+
 
         if not self.channelBlock:
             raise Exception("Channel Block not Initialized - Check Mode setting")
@@ -591,7 +620,7 @@ class ChannelBlock_AM(ChannelBlock_Base):
                         'id': self.channelId,
                         'status': status,
                         'rssi': self._rssi,
-                         'noiseFloor': self._noiseFloor_dBFS,
+                        'noiseFloor': self._noiseFloor_dBFS,
                     }
                 }])
 
@@ -755,7 +784,7 @@ class ChannelBlock_EAS(ChannelBlock_Base):
                         'id': self.channelId,
                         'status': status,
                         'rssi': self.blockFM._rssi,
-                         'noiseFloor': self.blockFM._noiseFloor_dBFS,
+                        'noiseFloor': self.blockFM._noiseFloor_dBFS,
                     }
                 }])
 
@@ -764,4 +793,191 @@ class ChannelBlock_EAS(ChannelBlock_Base):
     def getMinimumScanTime(self):
         return 0.2
 
+
+class ChannelBlock_SSB(ChannelBlock_Base):
+
+    FIXED_AUDIO_GAIN_FACTOR = 50
+
+    def __init__(self, channelId, label: str, channelFreq_hz: int, hardwareFreq_hz: int, audioGain_dB: float, squelchThreshold: float, dwellTime_s: float, rfSampleRate, upperNotLowerSideband: bool):
+        super().__init__()
+
+        self.channelId = channelId
+
+        self._label = label
+        self._dwellTime_s = dwellTime_s
+        self.audioGainFactor = dbToRatio(audioGain_dB) * self.FIXED_AUDIO_GAIN_FACTOR
+        self.squelchThreshold = squelchThreshold
+        self.upperNotLowerSideband = upperNotLowerSideband
+
+        ##################################################
+        # Parameters
+        ##################################################
+        self.rfSampleRate = rfSampleRate
+
+        ifFreq = FM_QUAD_RATE
+        ifSampleRate = BFM_QUAD_RATE
+
+        freqOffset_Hz = channelFreq_hz - hardwareFreq_hz - ifFreq
+
+        if self.upperNotLowerSideband:
+            ifPassbandLow = ifFreq
+            ifPassbandHigh = ifFreq + 3000
+        else:
+            ifPassbandLow = ifFreq - 3000
+            ifPassbandHigh = ifFreq
+
+        inputDecimation = self.rfSampleRate // ifSampleRate
+
+        intermediateDecimation, xlatDecimation = _filterDec(inputDecimation)
+
+        ##################################################
+        # Blocks
+        ##################################################
+
+        ###
+        # Input Channelization
+
+        self.blockInputIntermediateFilter = None
+        if inputDecimation >= 8 and intermediateDecimation > 1:
+            # Use an intermediate filter to spread out decimation, hopefully lowering CPU requirements
+
+            self.blockFreqXlatingFilter = gr_filter.freq_xlating_fft_filter_ccc(
+                xlatDecimation,
+                firdes.low_pass(1.0, self.rfSampleRate, self.rfSampleRate/(2*xlatDecimation), self.rfSampleRate/(4*xlatDecimation)),
+                freqOffset_Hz,
+                self.rfSampleRate
+            )
+            self.blockInputIntermediateFilter = gr_filter.fft_filter_ccc(
+                intermediateDecimation,
+                firdes.band_pass(1, self.rfSampleRate/xlatDecimation, ifPassbandLow, ifPassbandHigh, 1000),
+                2
+            )
+
+        else:
+            self.blockFreqXlatingFilter = gr_filter.freq_xlating_fir_filter_ccc(
+                inputDecimation,
+                firdes.band_pass(1.0, self.rfSampleRate, ifPassbandLow, ifPassbandHigh, 1000),
+                freqOffset_Hz,
+                self.rfSampleRate
+            )
+
+        ###
+        # Squelch and Demod
+
+        self.blockAnalogPowerSquelch = analog.pwr_squelch_cc(
+            self.squelchThreshold,
+            0.005,
+            0,
+            False
+        )
+
+        self.blockAnalogAgc = analog.agc2_cc(
+            0.1,    # attack
+            0.0001, # decay
+            0.05,    # ref
+            1.0,    # init gain
+            
+        )
+        self.blockAnalogAgc.set_max_gain(3.0)
+
+
+        self.blockComplexToReal = blocks.complex_to_real(1)
+
+        self.blockIfOsc = analog.sig_source_f(ifSampleRate, analog.GR_COS_WAVE, ifFreq, 1, 0, 0)
+        self.blockIfMultiply = blocks.multiply_vff(1)
+
+        ###
+        # Audio
+
+        self.blockAudioFilter = gr_filter.fft_filter_fff(
+            int(ifSampleRate / AUDIO_SAMPLERATE),
+            firdes.low_pass(
+                1,
+                ifSampleRate,
+                3000,
+                500,
+                window.WIN_HAMMING,
+                6.76
+            )
+        )
+        self.blockAudioGain = blocks.multiply_const_ff(self.audioGainFactor)
+
+        ###
+        # RSSI
+
+        self.blockRssiComplexToMag2 = blocks.complex_to_mag_squared(1)
+        self.blockRssiLowPassFilter = gr_filter.single_pole_iir_filter_ff( (1 / (ifSampleRate * RSSI_LOWPASS_TC)), 1)
+        self.blockRssiDecimate = blocks.keep_one_in_n(gr.sizeof_float*1, (ifSampleRate // RSSI_UPDATE_FREQ_HZ) )
+        self.blockRssi = RSSI_EmbeddedPythonBlock(self.updateRSSI)
+
+
+        ##################################################
+        # Connections
+        ##################################################
+
+        ###
+        # RF Chain
+
+        self.connect((self.blockAudioGain, 0), (self, 0))
+        self.connect((self.blockAudioFilter, 0), (self.blockAudioGain, 0))
+        self.connect((self.blockIfMultiply, 0), (self.blockAudioFilter, 0))
+        self.connect((self.blockIfOsc, 0), (self.blockIfMultiply, 1))
+        self.connect((self.blockComplexToReal, 0), (self.blockIfMultiply, 0))
+        self.connect((self.blockAnalogAgc, 0), (self.blockComplexToReal, 0))
+        self.connect((self.blockAnalogPowerSquelch, 0), (self.blockAnalogAgc, 0))
+
+        if self.blockInputIntermediateFilter:
+            self.connect((self.blockInputIntermediateFilter, 0), (self.blockAnalogPowerSquelch, 0))
+            self.connect((self.blockFreqXlatingFilter, 0), (self.blockInputIntermediateFilter, 0))
+        else:
+            self.connect((self.blockFreqXlatingFilter, 0), (self.blockAnalogPowerSquelch, 0))
+
+        self.connect((self, 0), (self.blockFreqXlatingFilter, 0))
+
+        ###
+        # RSSI Chain
+
+        self.connect((self.blockRssiDecimate, 0), (self.blockRssi, 0))
+        self.connect((self.blockRssiLowPassFilter, 0), (self.blockRssiDecimate, 0))
+        self.connect((self.blockRssiComplexToMag2, 0), (self.blockRssiLowPassFilter, 0))
+        if self.blockInputIntermediateFilter:
+            self.connect((self.blockInputIntermediateFilter, 0), (self.blockRssiComplexToMag2, 0))
+        else:
+            self.connect((self.blockFreqXlatingFilter, 0), (self.blockRssiComplexToMag2, 0))
+
+
+    def setAudioGain(self, dB: float):
+        self.audioGainFactor = dbToRatio(dB)
+        self.blockAudioGain.set_k(self.audioGainFactor * self.FIXED_AUDIO_GAIN_FACTOR)
+
+    def setSquelchValue(self, squelchThreshold):
+        self.squelchThreshold = squelchThreshold
+        self.blockAnalogPowerSquelch.set_threshold(squelchThreshold)
+
+    def getStatus(self, statusPipe):
+        status = ChannelStatus.IDLE
+        if self.blockAnalogPowerSquelch.unmuted():
+            self._active = True
+            self._lastActive = time.time()
+            status = ChannelStatus.ACTIVE
+        else:
+            self._active = False
+            if time.time() - self._lastActive < self._dwellTime_s:
+                status = ChannelStatus.DWELL
+
+        if status != self._lastStatusReport or (status != ChannelStatus.IDLE and (time.time() - self._lastStatusTime) > STATUS_UPDATE_TIME_S):
+            self._lastStatusTime = time.time()
+            self._lastStatusReport = status
+            if statusPipe:
+                statusPipe.send([{
+                    'type': 'channel_status',
+                    'data': {
+                        'id': self.channelId,
+                        'status': status,
+                        'rssi': self._rssi,
+                        'noiseFloor': self._noiseFloor_dBFS,
+                    }
+                }])
+
+        return status
 
