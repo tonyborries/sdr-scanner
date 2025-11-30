@@ -65,7 +65,7 @@ Channels are defined as entries under the 'channels' key, with the following key
 
 - freq: (Required) Frequency in MHz.
 - label: (Optional) Text label used when displaying the channel.
-- mode: (Optional, default FM) FM, NFM, AM
+- mode: (Optional, default FM)
 - audioGain_dB: (Optional, default 0.0) Gain applied to the demodulated audio
 - dwellTime_s: (Optional) Overrides the time spent monitoring the Channel after the last received activity.
 - squelchThreshold: (Optional) Overrides the default squelch threshold.
@@ -157,6 +157,8 @@ Supported Modes:
 - AM
 - FM
 - NFM
+- NOAA
+- BFM_EAS
 
 FM / NFM
 --------
@@ -167,8 +169,8 @@ Most applications will be one of two settings, commonly referred to as Wide and 
 - **Wide FM (FM)** +/- 5 KHz Deviation
 - **Narrow FM (NFM)** +/- 2.5 KHz Deviation
 
-**NOTE:** Broadcast FM (88-108 MHz) is +/- 75 KHz, MUCH wider than that used for two-way communications,
-and sometimes also referred to as Wide FM. No support for this is included as of now.
+**NOTE:** Broadcast FM (BFM) (88-108 MHz) is +/- 75 KHz, MUCH wider than that used for two-way communications,
+and sometimes also referred to as Wide FM. Limited support is available for this in the EAS monitoring.
 
 If mismatched, the following will occur:
 
@@ -182,6 +184,37 @@ As a starting point...
 - **FRS / GMRS:** - These channels have a mix of **Wide** and **Narrow** - check frequency lists for details.
 - **Marine VHF:** **Wide**
 - **NOAA Weather Radio:** **Wide**
+
+NOAA Emergency Alerts
+---------------------
+
+Example Config
+
+::
+
+      - freq: 162.525
+        label: "Local NOAA"
+        mode: NOAA
+        dwellTime_s: 120
+
+This mode scans a channel looking for the EAS Alert Tone (1050 Hz) on NOAA Weather Stations.
+If detected, the Channel is activated for the duration of the Dwell Time. No SAME decoding
+or End of Message is detected. Scanning resumes at the end of the Dwell Time.
+
+
+Broadcast FM EAS
+----------------
+
+Example Config
+
+::
+
+      - freq: 92.7
+        mode: BFM_EAS
+        dwellTime_s: 120
+
+This mode scans Broadcast FM radio stations for the dual (853 / 960 Hz) EAS Alert Tones.
+Similar to the NOAA mode, this plays the Channel for the duration of the configured Dwell Time.
 
 
 Future Work
@@ -200,7 +233,6 @@ My non-committal TODO list:
   to monitor continuously.
 - **Channel Disable** - Interactively Disable a Channel permanently or for some time period (e.g., 1 Hour)
 - **Channel Grouping** - Enable / Disable Groups of Channels
-- **EAS Alerting** - Monitor NOAA and/or FM Broadcast stations for EAS Alerts.
 - **Channel Inactivity Alerting** - Alert if a Channel has been inactive for a specified period.
 - **Stereo Audio Support** - Manual or automatic assignment of Channels between Left and Right channels
   to improve listening to Channels simultaneously.

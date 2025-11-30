@@ -40,6 +40,8 @@ class ScanWindow():
             channels,
         )
 
+        self._minimumScanTime = None
+
     @classmethod
     def fromConfig(cls, swc: ScanWindowConfig):
 
@@ -61,6 +63,15 @@ class ScanWindow():
             if channel.getStatus(statusPipe) != ChannelStatus.IDLE:
                 active = True
         return active
+
+    def getMinimumScanTime(self):
+        """
+        return the minimum time this window needs to scan.
+        e.g., EAS modes need enough samples to build up the FFT
+        """
+        if self._minimumScanTime is None:
+            self._minimumScanTime = max( [c.getMinimumScanTime() for c in self.channels] )
+        return self._minimumScanTime
 
 
 class ScanWindowBlock(gr.hier_block2):

@@ -10,11 +10,12 @@ from gnuradio import blocks
 from gnuradio import filter as gr_filter
 from gnuradio.filter import firdes
 from gnuradio import gr
-from gnuradio.fft import window
+from gnuradio.fft import logpwrfft, window
 
 from .const import (
     AUDIO_SAMPLERATE,
     FM_QUAD_RATE,
+    BFM_QUAD_RATE,
     NOISEFLOOR_LOWPASS_A,
     RSSI_LOWPASS_TC,
     RSSI_UPDATE_FREQ_HZ,
@@ -31,6 +32,8 @@ class ChannelMode(IntEnum):
     FM = 1
     NFM = 2
     AM = 3
+    NOAA_EAS = 4
+    BFM_EAS = 5
 
 
 def dbToRatio(dB: float) -> float:
@@ -87,6 +90,8 @@ class ChannelConfig():
             "FM": ChannelMode.FM,
             "NFM": ChannelMode.NFM,
             "AM": ChannelMode.AM,
+            "NOAA": ChannelMode.NOAA_EAS,
+            "BFM_EAS": ChannelMode.BFM_EAS,
         }.get(modeStr.upper())
 
     @classmethod
@@ -167,6 +172,32 @@ class Channel():
                 self.dwellTime_s,
                 rfSampleRate=rfSampleRate
             )
+        elif mode == ChannelMode.NOAA_EAS:
+            self.channelBlock = ChannelBlock_EAS(
+                self.id,
+                self.label,
+                self.freq_hz,
+                self.hardwareFreq_hz,
+                5000,
+                self.audioGain_dB,
+                self.squelchThreshold,
+                self.dwellTime_s,
+                rfSampleRate=rfSampleRate,
+                alertTones=[1050],
+            )
+        elif mode == ChannelMode.BFM_EAS:
+            self.channelBlock = ChannelBlock_EAS(
+                self.id,
+                self.label,
+                self.freq_hz,
+                self.hardwareFreq_hz,
+                75000,
+                self.audioGain_dB,
+                self.squelchThreshold,
+                self.dwellTime_s,
+                rfSampleRate=rfSampleRate,
+                alertTones=[853, 960],
+            )
 
         if not self.channelBlock:
             raise Exception("Channel Block not Initialized - Check Mode setting")
@@ -189,6 +220,10 @@ class Channel():
 
     def getStatus(self, statusPipe):
         return self.channelBlock.getStatus(statusPipe)
+
+    def getMinimumScanTime(self):
+        return self.channelBlock.getMinimumScanTime()
+
 
 class ChannelBlock_Base(gr.hier_block2):
 
@@ -218,6 +253,9 @@ class ChannelBlock_Base(gr.hier_block2):
             else:
                 self._noiseFloor_dBFS = (NOISEFLOOR_LOWPASS_A * rssi) + ((1 - NOISEFLOOR_LOWPASS_A) * self._noiseFloor_dBFS)
 
+    def getMinimumScanTime(self):
+        return 0.1
+
 
 class ChannelBlock_FM(ChannelBlock_Base):
     def __init__(self, channelId, label: str, channelFreq_hz: int, hardwareFreq_hz: int, deviation_hz: int, audioGain_dB: float, squelchThreshold: float, dwellTime_s: float, rfSampleRate):
@@ -227,9 +265,14 @@ class ChannelBlock_FM(ChannelBlock_Base):
 
         self._label = label
         self._deviation_hz = deviation_hz
-        self._dwellTime = dwellTime_s
+        self._dwellTime_s = dwellTime_s
         self.audioGainFactor = dbToRatio(audioGain_dB)
         self.squelchThreshold = squelchThreshold
+
+        if self._deviation_hz > AUDIO_SAMPLERATE:
+            self.fmQuadRate = BFM_QUAD_RATE
+        else:
+            self.fmQuadRate = FM_QUAD_RATE
 
         freqOffset_Hz = channelFreq_hz - hardwareFreq_hz
 
@@ -239,10 +282,10 @@ class ChannelBlock_FM(ChannelBlock_Base):
         self.rfSampleRate = rfSampleRate
 
 
-        if self.rfSampleRate % FM_QUAD_RATE != 0:
-            raise Exception(f"RF Sample Rate ({self.rfSampleRate}) is not a multiple of FM Quad Rate ({FM_QUAD_RATE})")
+        if self.rfSampleRate % self.fmQuadRate != 0:
+            raise Exception(f"RF Sample Rate ({self.rfSampleRate}) is not a multiple of FM Quad Rate ({self.fmQuadRate})")
 
-        inputDecimation = self.rfSampleRate // FM_QUAD_RATE
+        inputDecimation = self.rfSampleRate // self.fmQuadRate
 
         intermediateDecimation, xlatDecimation = _filterDec(inputDecimation)
 
@@ -273,7 +316,7 @@ class ChannelBlock_FM(ChannelBlock_Base):
 
         else:
             self.blockFreqXlatingFilter = gr_filter.freq_xlating_fir_filter_ccc(
-                self.rfSampleRate // FM_QUAD_RATE,
+                self.rfSampleRate // self.fmQuadRate,
                 firdes.low_pass(1.0, self.rfSampleRate, half_bandwidth, half_bandwidth/4),
                 freqOffset_Hz,
                 self.rfSampleRate
@@ -290,7 +333,7 @@ class ChannelBlock_FM(ChannelBlock_Base):
         )
         self.blockAnalogNbfmRx = analog.nbfm_rx(
             audio_rate=AUDIO_SAMPLERATE,
-            quad_rate=FM_QUAD_RATE,
+            quad_rate=self.fmQuadRate,
             tau=75e-6,
             max_dev=self._deviation_hz,
           )
@@ -316,8 +359,8 @@ class ChannelBlock_FM(ChannelBlock_Base):
         # RSSI
 
         self.blockRssiComplexToMag2 = blocks.complex_to_mag_squared(1)
-        self.blockRssiLowPassFilter = gr_filter.single_pole_iir_filter_ff( (1 / (FM_QUAD_RATE * RSSI_LOWPASS_TC)), 1)
-        self.blockRssiDecimate = blocks.keep_one_in_n(gr.sizeof_float*1, (FM_QUAD_RATE // RSSI_UPDATE_FREQ_HZ) )
+        self.blockRssiLowPassFilter = gr_filter.single_pole_iir_filter_ff( (1 / (self.fmQuadRate * RSSI_LOWPASS_TC)), 1)
+        self.blockRssiDecimate = blocks.keep_one_in_n(gr.sizeof_float*1, (self.fmQuadRate // RSSI_UPDATE_FREQ_HZ) )
         self.blockRssi = RSSI_EmbeddedPythonBlock(self.updateRSSI)
 
 
@@ -369,7 +412,7 @@ class ChannelBlock_FM(ChannelBlock_Base):
             status = ChannelStatus.ACTIVE
         else:
             self._active = False
-            if time.time() - self._lastActive < self._dwellTime:
+            if time.time() - self._lastActive < self._dwellTime_s:
                 status = ChannelStatus.DWELL
 
         if status != self._lastStatusReport or (status != ChannelStatus.IDLE and (time.time() - self._lastStatusTime) > STATUS_UPDATE_TIME_S):
@@ -399,7 +442,7 @@ class ChannelBlock_AM(ChannelBlock_Base):
         self.channelId = channelId
 
         self._label = label
-        self._dwellTime = dwellTime_s
+        self._dwellTime_s = dwellTime_s
         self.audioGainFactor = dbToRatio(audioGain_dB) * self.FIXED_AUDIO_GAIN_FACTOR
         self.squelchThreshold = squelchThreshold
 
@@ -535,7 +578,7 @@ class ChannelBlock_AM(ChannelBlock_Base):
             status = ChannelStatus.ACTIVE
         else:
             self._active = False
-            if time.time() - self._lastActive < self._dwellTime:
+            if time.time() - self._lastActive < self._dwellTime_s:
                 status = ChannelStatus.DWELL
 
         if status != self._lastStatusReport or (status != ChannelStatus.IDLE and (time.time() - self._lastStatusTime) > STATUS_UPDATE_TIME_S):
@@ -554,5 +597,171 @@ class ChannelBlock_AM(ChannelBlock_Base):
 
         return status
 
+
+class ToneDetect_EmbeddedPythonBlock(gr.sync_block):
+    """
+    Check for the existence of specific tones in the stream. If the Tone(s) are detected,
+    execute the activeCb Callback.
+
+    testIndexes
+        The FFT Indexes of expected Tones
+    refLowIndex / refHighIndex
+        FFT Indexes of a reference passband to compare the Tone frequecies against.
+    """
+
+    def __init__(self, activeCb, testIndexes: List[int], refLowIndex: int, refHighIndex: int, fftSize: int):
+        gr.sync_block.__init__(
+            self,
+            name='NOAA EAS Embedded Python Block',
+            in_sig=[(np.float32, fftSize)],
+            out_sig=[]
+        )
+        self.activeCb = activeCb
+        self.testIndexes = testIndexes
+        self.refLowIndex = refLowIndex
+        self.refHighIndex = refHighIndex
+        self.fftSize = fftSize
+
+    def work(self, input_items, output_items):
+
+        THRESHOLD = 20.0
+
+        for inVec in input_items[0]:
+
+            # Compute reference band power
+            refPwr = max(inVec[self.refLowIndex: self.refHighIndex + 1])
+
+            # Ensure each tone freq is above the threshold
+            active = True
+            for i in self.testIndexes:
+                print(f"{inVec[i-1]} {inVec[i]} {inVec[i+1]} {refPwr}")
+                if inVec[i] - refPwr < THRESHOLD or inVec[i] < inVec[i-1] or inVec[i] < inVec[i+1]:
+                    active = False
+                    break
+            self.activeCb(active)
+
+        return len(input_items[0])
+
+
+class ChannelBlock_EAS(ChannelBlock_Base):
+
+    def __init__(self, channelId, label: str, channelFreq_hz: int, hardwareFreq_hz: int, deviation_hz: int, audioGain_dB: float, squelchThreshold: float, dwellTime_s: float, rfSampleRate, alertTones: List[int]):
+
+        super().__init__()
+
+        self.channelId = channelId
+        self._label = label
+        self._dwellTime_s = dwellTime_s
+        self._triggerCount = 0
+
+        self._alertTones = alertTones
+
+        self._timeoutTime = 0
+
+        ##################################################
+        # Blocks
+        ##################################################
+
+        ###
+        # FM Demodulator
+
+        self.blockFM = ChannelBlock_FM(
+            channelId,
+            label,
+            channelFreq_hz,
+            hardwareFreq_hz,
+            deviation_hz,
+            audioGain_dB,
+            squelchThreshold,
+            dwellTime_s,
+            rfSampleRate
+        )
+
+        ###
+        # EAS Attention Tone Squelch
+
+        FFT_SIZE = 1024
+
+        self.blockLogPowerFFT = logpwrfft.logpwrfft_f(
+            sample_rate=AUDIO_SAMPLERATE,
+            fft_size=FFT_SIZE,
+            ref_scale=1,
+            frame_rate=30,
+            avg_alpha=1.0,
+            average=False,
+            shift=False
+        )
+
+        def _binNum(freq):
+            return round(freq * FFT_SIZE / AUDIO_SAMPLERATE)
+
+        self.blockToneDetect = ToneDetect_EmbeddedPythonBlock(
+            activeCb=self.activeCb,
+            testIndexes=[_binNum(t) for t in self._alertTones],
+            refLowIndex=_binNum(1100),
+            refHighIndex=_binNum(1200),
+            fftSize=FFT_SIZE
+        )
+
+        self.blockAudioMute = blocks.mute_ff(True)
+
+        ##################################################
+        # Connections
+        ##################################################
+
+        self.connect((self.blockLogPowerFFT, 0), (self.blockToneDetect, 0))
+        self.connect((self.blockFM, 0), (self.blockLogPowerFFT, 0))
+
+        self.connect((self.blockAudioMute, 0), (self, 0))
+        self.connect((self.blockFM, 0), (self.blockAudioMute, 0))
+        self.connect((self, 0), (self.blockFM, 0))
+        
+    def activeCb(self, isActive: bool):
+        """
+        Continually called by the Embedded Python Block to indicate if there is activity on the channel
+        """
+
+        if isActive:
+            # Require 3 triggers in a row to activate - helps avoid false positives
+            self._triggerCount += 1
+            print(f"** EAS Trigger Count: {self._triggerCount}")
+            if self._triggerCount >= 3:
+                self.blockAudioMute.set_mute(False)
+                self._active = True
+                self._lastActive = time.time()
+                self._timeoutTime = self._lastActive + self._dwellTime_s
+        else:
+            self._triggerCount = 0
+
+    def getStatus(self, statusPipe):
+        status = ChannelStatus.IDLE
+        if self._active:
+            self._active = True
+            status = ChannelStatus.ACTIVE
+            if time.time() > self._timeoutTime:
+                self._active = False
+                self.blockAudioMute.set_mute(True)
+        elif self._triggerCount > 0:
+            # in a pre-trigger state - keep the window active
+            status = ChannelStatus.DWELL
+
+        if status != self._lastStatusReport or (status != ChannelStatus.IDLE and (time.time() - self._lastStatusTime) > STATUS_UPDATE_TIME_S):
+            self._lastStatusTime = time.time()
+            self._lastStatusReport = status
+            if statusPipe:
+                statusPipe.send([{
+                    'type': 'channel_status',
+                    'data': {
+                        'id': self.channelId,
+                        'status': status,
+                        'rssi': self.blockFM._rssi,
+                         'noiseFloor': self.blockFM._noiseFloor_dBFS,
+                    }
+                }])
+
+        return status
+
+    def getMinimumScanTime(self):
+        return 0.2
 
 

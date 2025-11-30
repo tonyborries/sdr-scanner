@@ -48,7 +48,7 @@ class ReceiverBlock(gr.top_block):
 
         self.start()
 
-        windowTimeout = time.time() + 0.1
+        windowTimeout = time.time() + scanWindow.getMinimumScanTime()
 
         try:
             #input('Press Enter to quit: ')
