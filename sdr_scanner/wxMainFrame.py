@@ -73,6 +73,8 @@ class RSSIDisplayPanelManager(BasePanelManager):
     LABEL_WIDTH = 70
     NOISEFLOOR_LABEL_WIDTH = LABEL_WIDTH + BAR_WIDTH * 4 + BAR_SPACING * 3
 
+    VOLUME_PANEL_WIDTH = NOISEFLOOR_LABEL_WIDTH
+    VOLUME_PANEL_HEIGHT = 10
 
     def __init__(self, parentPanel):
         self.parentPanel = parentPanel
@@ -114,15 +116,23 @@ class RSSIDisplayPanelManager(BasePanelManager):
         self.stNoiseFloor.SetFont(font)
         sizer.Add(self.stNoiseFloor, 0, 0, 0)
 
+        ###
+        # Volume Bar
+
+        self.volumePanel = wx.Panel(self.panel, size=(self.VOLUME_PANEL_WIDTH, self.VOLUME_PANEL_HEIGHT))
+        sizer.Add(self.volumePanel, 0, wx.FIXED_MINSIZE | wx.ALL, 2)
+
 
         self.panel.SetSizer(sizer)
 
-        self.meterPanel.Bind(wx.EVT_PAINT, self.OnPaint)
+        self.meterPanel.Bind(wx.EVT_PAINT, self.OnPaintRSSI)
+        self.volumePanel.Bind(wx.EVT_PAINT, self.OnPaintVolume)
 
         self.rssi_dBFS = -999
         self.rssiOverThreshold = -999
+        self._volume_dBFS: Optional[float] = -999.9
 
-    def OnPaint(self, event):
+    def OnPaintRSSI(self, event):
         # Create a Device Context (DC) for painting the panel
         dc = wx.PaintDC(self.meterPanel)
 
@@ -143,6 +153,31 @@ class RSSIDisplayPanelManager(BasePanelManager):
 
             i += 1
 
+    def OnPaintVolume(self, event):
+        # Create a Device Context (DC) for painting the panel
+        dc = wx.PaintDC(self.volumePanel)
+
+        # draw border
+        dc.SetPen(wx.Pen('black', 1, wx.SOLID))
+        dc.SetBrush(wx.Brush('black', wx.BRUSHSTYLE_TRANSPARENT))
+        x1 = 0
+        y1 = 0
+        x2 =self.VOLUME_PANEL_WIDTH
+        y2 = self.VOLUME_PANEL_HEIGHT
+        dc.DrawRectangle(x1, y1, x2, y2)
+        
+        # draw volume
+        minVal = -50
+        maxVal = 0
+        if self._volume_dBFS is not None and self._volume_dBFS > minVal:
+            dc.SetPen(wx.Pen('black', 0, wx.SOLID))
+            dc.SetBrush(wx.Brush('green', wx.SOLID))
+            if self._volume_dBFS >= maxVal:
+                x2 = self.VOLUME_PANEL_WIDTH
+            else:
+                x2 = int(self.VOLUME_PANEL_WIDTH * ((self._volume_dBFS - minVal) / (maxVal - minVal)))
+            dc.DrawRectangle(x1, y1, x2, y2)
+
     def setRSSI(self, rssi: float, rssiOverThreshold: float, noiseFloor: Optional[float]):
         self.rssi_dBFS = rssi
         self.rssiOverThreshold = rssiOverThreshold
@@ -153,6 +188,10 @@ class RSSIDisplayPanelManager(BasePanelManager):
         else:
             self.stNoiseFloor.SetLabel(f"Noise: {self.noiseFloor_dBFS:4.0f} dBFS")
         self.meterPanel.Refresh()
+
+    def setVolume(self, volume_dBFS: Optional[float]):
+        self._volume_dBFS = volume_dBFS
+        self.volumePanel.Refresh()
 
 
 class ChannelStripPanelManager(BasePanelManager):
@@ -210,6 +249,9 @@ class ChannelStripPanelManager(BasePanelManager):
     def setRSSI(self, rssi: float, noiseFloor: Optional[float]):
         rssiOverThreshold = rssi - self.channelConfig.squelchThreshold
         self.rssiPM.setRSSI(rssi, rssiOverThreshold, noiseFloor)
+
+    def setVolume(self, volume_dBFS: float):
+        self.rssiPM.setVolume(volume_dBFS)
 
     def setChannelStatus(self, status: ChannelStatus):
         bgColor = wx.Colour(192, 192, 192)  # IDLE
@@ -274,6 +316,13 @@ class ActiveChannelPanelManager(BasePanelManager):
             print("*** CHANNEL NOT FOUND - ActiveChannelPanelManager")
             return
         cspm.setRSSI(rssi, noiseFloor)
+
+    def setChannelVolume(self, channelId, volume_dBFS: float):
+        cspm = self.channelStripPanelManagersById.get(channelId)
+        if not cspm:
+            print("*** CHANNEL NOT FOUND - ActiveChannelPanelManager")
+            return
+        cspm.setVolume(volume_dBFS)
 
     def setChannelStatus(self, channelId, status: ChannelStatus):
         cspm = self.channelStripPanelManagersById.get(channelId)
@@ -353,6 +402,9 @@ class MainFrame(wx.Frame):
 
     def channelStatusCb(self, data):
         print(data)
+
+        volume_dBFS = data.get('volume')
+        self.activeChannelPanelManager.setChannelVolume(data['id'], volume_dBFS)
 
         rssi = data.get('rssi')
         noiseFloor = data.get('noiseFloor')

@@ -19,7 +19,9 @@ from .const import (
     NOISEFLOOR_LOWPASS_A,
     RSSI_LOWPASS_TC,
     RSSI_UPDATE_FREQ_HZ,
-    STATUS_UPDATE_TIME_S
+    STATUS_UPDATE_TIME_S,
+    VOLUME_LOWPASS_ATTACK_A,
+    VOLUME_LOWPASS_DECAY_A,
 )
 
 
@@ -53,20 +55,65 @@ def _filterDec(x):
         n -= 1
     return 1, x
 
-class RSSI_EmbeddedPythonBlock(gr.sync_block):
 
-    def __init__(self, rssiCb):
+class Mag2ToPower_EmbeddedPythonBlock(gr.sync_block):
+    """
+    Take the most recent input, convert to dBFS, and execute the provided callback.
+    """
+
+    def __init__(self, cb):
         gr.sync_block.__init__(
             self,
-            name='RSSI Embedded Python Block',   # will show up in GRC
+            name='Mag2ToPower Embedded Python Block',
             in_sig=[np.float32],
             out_sig=[]
         )
-        self.rssiCb = rssiCb
+        self._cb = cb
 
     def work(self, input_items, output_items):
-        dBFS = 10 * math.log10(input_items[0][-1])
-        self.rssiCb(dBFS)
+        val = input_items[0][-1]
+        if val <= 0:
+            dBFS = -150  # arbitrary lower bound
+        else:
+            dBFS = 10 * math.log10(input_items[0][-1])
+        self._cb(dBFS)
+        return len(input_items[0])
+
+
+class MagToPowerLowPass_EmbeddedPythonBlock(gr.sync_block):
+    """
+    Calculate an averaged power for a signal stream, with separate alpha for
+    attack and decay.
+
+    Execute the callback with the latest value.
+    """
+
+    def __init__(self, cb, attackAlpha, decayAlpha):
+        gr.sync_block.__init__(
+            self,
+            name='MagToPower Embedded Python Block',
+            in_sig=[np.float32],
+            out_sig=[]
+        )
+        self._cb = cb
+        self._attackAlpha = attackAlpha
+        self._decayAlpha = decayAlpha
+        self._curMag2Avg = -150
+
+    def work(self, input_items, output_items):
+
+        for mag in input_items[0]:
+            mag2 = mag ** 2
+            if mag2 > self._curMag2Avg:
+                self._curMag2Avg = (self._attackAlpha * mag2) + ((1 - self._attackAlpha) * self._curMag2Avg)
+            else:
+                self._curMag2Avg = (self._decayAlpha * mag2) + ((1 - self._decayAlpha) * self._curMag2Avg)
+
+        if self._curMag2Avg <= 0:
+            dBFS = -150  # arbitrary lower bound
+        else:
+            dBFS = 10 * math.log10(self._curMag2Avg)
+        self._cb(dBFS)
         return len(input_items[0])
 
 
@@ -120,7 +167,10 @@ class ChannelConfig():
             kwargs['dwellTime_s'] = defaultChannelConfig.dwellTime_s
 
         if 'mode' in configDict:
-            kwargs['mode'] = cls.modeStrLookup(configDict['mode'])
+            mode = cls.modeStrLookup(configDict['mode'])
+            if mode is None:
+                raise Exception(f"Unknown Mode \"{configDict['mode']}\"")
+            kwargs['mode'] = mode
         for k in ['audioGain_dB', 'squelchThreshold', 'dwellTime_s']:
             if k in configDict:
                 kwargs[k] = configDict[k]
@@ -270,6 +320,21 @@ class ChannelBlock_Base(gr.hier_block2):
 
         self._rssi = None
         self._noiseFloor_dBFS = None
+        self._volume_dBFS = None
+
+        ###
+        # Volume Blocks
+
+        self.blockVolume = MagToPowerLowPass_EmbeddedPythonBlock(self.updateVolume, VOLUME_LOWPASS_ATTACK_A, VOLUME_LOWPASS_DECAY_A)
+
+    def _connectVolume(self, sourceBlock, sourceBlockPort):
+        """
+        sourceBlock
+            The output audio block, must be at AUDIO_SAMPLERATE
+        sourceBlockPort
+            The sourceBlock port to connect from
+        """
+        self.connect((sourceBlock, sourceBlockPort), (self.blockVolume, 0))
 
     def updateRSSI(self, rssi: float):
         """
@@ -281,6 +346,9 @@ class ChannelBlock_Base(gr.hier_block2):
                 self._noiseFloor_dBFS = rssi
             else:
                 self._noiseFloor_dBFS = (NOISEFLOOR_LOWPASS_A * rssi) + ((1 - NOISEFLOOR_LOWPASS_A) * self._noiseFloor_dBFS)
+
+    def updateVolume(self, volume_dBFS: float):
+        self._volume_dBFS = volume_dBFS
 
     def getMinimumScanTime(self):
         return 0.1
@@ -385,13 +453,12 @@ class ChannelBlock_FM(ChannelBlock_Base):
         self.blockAudioGain = blocks.multiply_const_ff(self.audioGainFactor)
 
         ###
-        # RSSI
+        # RSSI Blocks
 
         self.blockRssiComplexToMag2 = blocks.complex_to_mag_squared(1)
         self.blockRssiLowPassFilter = gr_filter.single_pole_iir_filter_ff( (1 / (self.fmQuadRate * RSSI_LOWPASS_TC)), 1)
         self.blockRssiDecimate = blocks.keep_one_in_n(gr.sizeof_float*1, (self.fmQuadRate // RSSI_UPDATE_FREQ_HZ) )
-        self.blockRssi = RSSI_EmbeddedPythonBlock(self.updateRSSI)
-
+        self.blockRssi = Mag2ToPower_EmbeddedPythonBlock(self.updateRSSI)
 
         ##################################################
         # Connections
@@ -424,6 +491,8 @@ class ChannelBlock_FM(ChannelBlock_Base):
         else:
             self.connect((self.blockFreqXlatingFilter, 0), (self.blockRssiComplexToMag2, 0))
 
+        # Volume
+        self._connectVolume(self.blockAudioGain, 0)
 
     def setAudioGain(self, dB: float):
         self.audioGainFactor = dbToRatio(dB)
@@ -455,6 +524,7 @@ class ChannelBlock_FM(ChannelBlock_Base):
                         'status': status,
                          'rssi': self._rssi,
                          'noiseFloor': self._noiseFloor_dBFS,
+                         'volume': self._volume_dBFS,
                     }
                 }])
 
@@ -554,7 +624,7 @@ class ChannelBlock_AM(ChannelBlock_Base):
         self.blockRssiComplexToMag2 = blocks.complex_to_mag_squared(1)
         self.blockRssiLowPassFilter = gr_filter.single_pole_iir_filter_ff( (1 / (AUDIO_SAMPLERATE * RSSI_LOWPASS_TC)), 1)
         self.blockRssiDecimate = blocks.keep_one_in_n(gr.sizeof_float*1, (AUDIO_SAMPLERATE // RSSI_UPDATE_FREQ_HZ) )
-        self.blockRssi = RSSI_EmbeddedPythonBlock(self.updateRSSI)
+        self.blockRssi = Mag2ToPower_EmbeddedPythonBlock(self.updateRSSI)
 
 
         ##################################################
@@ -590,6 +660,8 @@ class ChannelBlock_AM(ChannelBlock_Base):
         else:
             self.connect((self.blockFreqXlatingFilter, 0), (self.blockRssiComplexToMag2, 0))
 
+        # Volume
+        self._connectVolume(self.blockAudioGain, 0)
 
     def setAudioGain(self, dB: float):
         self.audioGainFactor = dbToRatio(dB)
@@ -621,6 +693,7 @@ class ChannelBlock_AM(ChannelBlock_Base):
                         'status': status,
                         'rssi': self._rssi,
                         'noiseFloor': self._noiseFloor_dBFS,
+                        'volume': self._volume_dBFS,
                     }
                 }])
 
@@ -785,6 +858,7 @@ class ChannelBlock_EAS(ChannelBlock_Base):
                         'status': status,
                         'rssi': self.blockFM._rssi,
                         'noiseFloor': self.blockFM._noiseFloor_dBFS,
+                        'volume': self.blockFM._volume_dBFS,
                     }
                 }])
 
@@ -908,7 +982,7 @@ class ChannelBlock_SSB(ChannelBlock_Base):
         self.blockRssiComplexToMag2 = blocks.complex_to_mag_squared(1)
         self.blockRssiLowPassFilter = gr_filter.single_pole_iir_filter_ff( (1 / (ifSampleRate * RSSI_LOWPASS_TC)), 1)
         self.blockRssiDecimate = blocks.keep_one_in_n(gr.sizeof_float*1, (ifSampleRate // RSSI_UPDATE_FREQ_HZ) )
-        self.blockRssi = RSSI_EmbeddedPythonBlock(self.updateRSSI)
+        self.blockRssi = Mag2ToPower_EmbeddedPythonBlock(self.updateRSSI)
 
 
         ##################################################
@@ -945,6 +1019,8 @@ class ChannelBlock_SSB(ChannelBlock_Base):
         else:
             self.connect((self.blockFreqXlatingFilter, 0), (self.blockRssiComplexToMag2, 0))
 
+        # Volume
+        self._connectVolume(self.blockAudioGain, 0)
 
     def setAudioGain(self, dB: float):
         self.audioGainFactor = dbToRatio(dB)
@@ -976,6 +1052,7 @@ class ChannelBlock_SSB(ChannelBlock_Base):
                         'status': status,
                         'rssi': self._rssi,
                         'noiseFloor': self._noiseFloor_dBFS,
+                        'volume': self._volume_dBFS,
                     }
                 }])
 
