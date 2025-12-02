@@ -3,9 +3,11 @@ import threading
 import time
 from typing import List, Optional
 import wx
+import wx.dataview as dv
 
-from sdr_scanner.Channel import ChannelConfig, ChannelStatus
-from sdr_scanner.Scanner import Scanner
+from .Channel import ChannelConfig, ChannelStatus
+from .Scanner import Scanner
+from .wxConfigDisplayFrame import ConfigDisplayFrame
 
 
 class StoppableThread(threading.Thread):
@@ -342,19 +344,47 @@ class MainFrame(wx.Frame):
         # ensure the parent's __init__ is called
         super().__init__(*args, **kw)
 
+        self.configDisplayFrame = None
 
         ###
         # Setup Scanner
 
         self._scanner = scanner
 
-        ###
-        # Build UI
+        ##################################
+        #                                #
+        #            Build UI            #
+        #                                #
+        ##################################
 
         # create a panel in the frame
         self.panel = wx.Panel(self)
 
         self.sizer = wx.BoxSizer(wx.VERTICAL)
+
+        ###
+        # Menu Bar
+
+        fileMenu = wx.Menu()
+        # The "\t..." syntax defines an accelerator key that also triggers the same event
+        #fileMenu.AppendSeparator()
+        # When using a stock ID we don't need to specify the menu item's label
+        exitItem = fileMenu.Append(wx.ID_EXIT)
+
+        windowMenu = wx.Menu()
+        showConfigItem = windowMenu.Append(-1, "Show Config &Detail...\tCtrl-D")
+
+        menuBar = wx.MenuBar()
+        menuBar.Append(fileMenu, "&File")
+        menuBar.Append(windowMenu, "&Window")
+
+        # Give the menu bar to the frame
+        self.SetMenuBar(menuBar)
+
+        # Bind Menu Bar Events
+        self.Bind(wx.EVT_MENU, self.onShowConfigFrame, showConfigItem)
+        self.Bind(wx.EVT_MENU, self.OnExit,  exitItem)
+
 
         ###
         # Active Channel Manager
@@ -371,9 +401,11 @@ class MainFrame(wx.Frame):
 
         self.Bind(wx.EVT_CLOSE, self.OnFrameClose)
 
-
-        ###
-        # Launch Scanner
+        ##################################
+        #                                #
+        #         Launch Scanner         #
+        #                                #
+        ##################################
 
         self._scannerControlThread = ScannerControlThread(
             self._scanner,
@@ -416,12 +448,24 @@ class MainFrame(wx.Frame):
             if channel:
                 print(f"\n {datetime.datetime.now().time().isoformat()[0:8]}  {channel.label} ({channel.freq_hz/1e6})")
         self.activeChannelPanelManager.setChannelStatus(data['id'], data['status'])
+        
+        # Update ConfigDisplay Frame
+        if self.configDisplayFrame:
+            self.configDisplayFrame.SetChannelStatus(data['id'], data['status'])
+
+    def onShowConfigFrame(self, event):
+        self.configDisplayFrame = ConfigDisplayFrame(self._scanner, None, title="Scanner Config", size=(600,400))
+        self.configDisplayFrame.Show()
+        self.configDisplayFrame.Raise()
+        self.configDisplayFrame.SetFocus()
 
     def OnExit(self, event):
         """Close the frame, terminating the application."""
         self.Close(True)
 
     def OnFrameClose(self, event):
+        if self.configDisplayFrame:
+            self.configDisplayFrame.Close(True)
         self._scannerControlThread.stop()
         self._scannerControlThread.join()
 

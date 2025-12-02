@@ -158,7 +158,7 @@ class ChannelConfig():
         kwargs = {}
 
         kwargs['freq_hz'] = configDict['freq'] * 1e6
-        kwargs['label'] = configDict.get('label', configDict['freq'])
+        kwargs['label'] = str(configDict.get('label', configDict['freq']))
 
         if defaultChannelConfig:
             kwargs['mode'] = defaultChannelConfig.mode
