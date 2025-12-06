@@ -1,8 +1,11 @@
+# disable annoying INFO messages when connecting
+import os
+os.environ['SOAPY_SDR_LOG_LEVEL'] = 'WARNING'
+
+import contextlib
 from enum import IntEnum
-import sys
-import signal
 import time
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 import uuid
 
 from gnuradio import audio
@@ -11,7 +14,7 @@ from gnuradio import soapy
 
 from .const import AUDIO_SAMPLERATE
 from .Channel import Channel
-from .ScanWindow import ScanWindow
+from .ScanWindow import ScanWindow, ScanWindowConfig
 
 
 class ReceiverType(IntEnum):
@@ -19,10 +22,23 @@ class ReceiverType(IntEnum):
     RTL_SDR = 1
 
 
+class ReceiverStatus(IntEnum):
+    IDLE = 0
+    RUNNING_WINDOW = 1
+    WINDOW_COMPLETE = 2
+    FAILED = 3
+
+
 class ReceiverBlock(gr.top_block):
 
-    def __init__(self):
+    def __init__(self, deviceArg=''):
         gr.top_block.__init__(self, "RTL-SDR Rx", catch_exceptions=True)
+
+        self.deviceArg = deviceArg
+
+        self.status: ReceiverStatus = ReceiverStatus.IDLE
+        self._windowTimeout = 0.0
+        self._scanWindow: Optional[ScanWindow] = None
 
     def setupWindow(self, scanWindow, audioSink):
         raise NotImplementedError()
@@ -30,40 +46,30 @@ class ReceiverBlock(gr.top_block):
     def teardownWindow(self, scanWindow, audioSink):
         raise NotImplementedError()
 
-    def runWindow(self, scanWindow, audioSink, statusPipe):
-        # radio specific setup
-        self.setupWindow(scanWindow, audioSink)
+    def startWindow(self):
+        if self._scanWindow is None:
+            raise Exception("ScanWindow not configured")
 
-        # run for specified time
-        def sig_handler(sig=None, frame=None):
-            self.stop()
-            self.wait()
-
-            sys.exit(0)
-
-        signal.signal(signal.SIGINT, sig_handler)
-        signal.signal(signal.SIGTERM, sig_handler)
-
-        self.timeoutflag = False
-
+        self.status = ReceiverStatus.RUNNING_WINDOW
         self.start()
+        self._windowTimeout = time.time() + self._scanWindow.getMinimumScanTime()
 
-        windowTimeout = time.time() + scanWindow.getMinimumScanTime()
-
-        try:
-            #input('Press Enter to quit: ')
-            while not self.timeoutflag:
-                time.sleep(0.001)
-                if not scanWindow.isActive(statusPipe) and time.time() > windowTimeout:
-                    self.timeoutflag = True
-        except EOFError:
-            pass
-
+    def stopWindow(self):
         self.stop()
         self.wait()
+        self.status = ReceiverStatus.IDLE
 
-        # radio specific teardown
-        self.teardownWindow(scanWindow, audioSink)
+    def checkWindow(self, statusPipe) -> bool:
+        """
+        return True if the Window is active, False if it is done and stopped
+        """
+        if not self._scanWindow:
+            return False
+        if not self._scanWindow.isActive(statusPipe) and time.time() > self._windowTimeout:
+            self.stopWindow()
+            self.status = ReceiverStatus.WINDOW_COMPLETE
+            return False
+        return True
 
 
 class Receiver_RTLSDR(ReceiverBlock):
@@ -79,15 +85,13 @@ class Receiver_RTLSDR(ReceiverBlock):
     ]
 
     def __init__(self, deviceArg=''):
-        super().__init__()
+        super().__init__(deviceArg='')
 
         self.soapy_rtlsdr_source_0 = None
         dev = 'driver=rtlsdr'
         stream_args = ''
         tune_args = ['']
         settings = ['']
-
-        self.deviceArg = deviceArg
 
         self.soapy_rtlsdr_source_0 = soapy.source(dev, "fc32", 1, self.deviceArg, stream_args, tune_args, settings)
         self.soapy_rtlsdr_source_0.set_gain_mode(0, False)
@@ -98,6 +102,8 @@ class Receiver_RTLSDR(ReceiverBlock):
         return f"RTL-SDR {self.deviceArg}"
 
     def setupWindow(self, scanWindow, audioSink):
+
+        self._scanWindow = scanWindow
 
         # tune radio to window center freq
         self.soapy_rtlsdr_source_0.set_sample_rate(0, scanWindow.rfSampleRate)
@@ -118,10 +124,10 @@ def lookupRxType(rxTypeStr) -> ReceiverType:
         'RTL-SDR': ReceiverType.RTL_SDR
     }.get(rxTypeStr, ReceiverType.UNKNOWN)
 
-def lookupRxBlockCls(rxType: ReceiverType) -> "ReceiverBlock":
+def lookupRxBlockCls(rxType: ReceiverType) -> type["ReceiverBlock"]:
     return {
         ReceiverType.RTL_SDR: Receiver_RTLSDR
-    }.get(rxType)
+    }[rxType]
 
 
 class Receiver():
@@ -130,7 +136,7 @@ class Receiver():
         self.rxType = rxType
         self.receiverArgs = receiverArgs
 
-        self._scanWindowsById = {}
+        self._scanWindowsById: Dict[Any, ScanWindow] = {}
 
         self._receiverBlock = lookupRxBlockCls(self.rxType)(**self.receiverArgs)
 
@@ -144,19 +150,10 @@ class Receiver():
         self._scanWindowsById = {}
 
         for swc in configDict['scanWindows']:
-
-            channels = []
-            for cc in swc.channelConfigs:
-                channels.append( Channel.fromConfig(cc, swc) )
-
             self._scanWindowsById[swc.id] = ScanWindow.fromConfig(swc)
-
-        print("Config'd")
 
     def getScanWindow(self, swId):
         return self._scanWindowsById[swId]
-
-
 
 
 class ReceiverConfig():
@@ -175,14 +172,11 @@ class ReceiverConfig():
         if not self._rxBlockCls:
             raise Exception(f"Block not found for Receiver Type: '{rxTypeStr}'")
 
-        self.scanWindowConfigs = []
-
-        self._scanWindowsById = {}
-
+        self.scanWindowConfigs: List[ScanWindowConfig] = []
+        self._scanWindowsById: Dict[Any, ScanWindow] = {}
 
     def getSampleRates(self):
         return Receiver_RTLSDR.SAMPLE_RATES
-
 
 
 def runAsProcess(pipe, receiverConfig: ReceiverConfig):
@@ -193,13 +187,11 @@ def runAsProcess(pipe, receiverConfig: ReceiverConfig):
 
 def _runAsProcess(pipe, receiverConfig: ReceiverConfig):
 
-
     rx = Receiver(receiverConfig.id, receiverConfig.rxType, receiverConfig.receiverArgs)
-
     rxBlock = rx.getReceiverBlock()
-
     audio_sink_0 = audio.sink(AUDIO_SAMPLERATE, '', True)
 
+    runningWindow = None
     while True:
 
         ###
@@ -209,13 +201,66 @@ def _runAsProcess(pipe, receiverConfig: ReceiverConfig):
             packet = pipe.recv()
             for item in packet:
                 if item['type'] == 'config':
+                    if rxBlock.status == ReceiverStatus.RUNNING_WINDOW:
+                        rxBlock.stopWindow()
+                        rxBlock.teardownWindow(runningWindow, audio_sink_0)
                     rx.applyConfigDict(item['data'])
                 elif item['type'] == 'kill':
+                    if rxBlock.status == ReceiverStatus.RUNNING_WINDOW:
+                        rxBlock.stopWindow()
                     return
                 elif item['type'] == 'scan_window':
                     windowId = item['data']
+                    scanWindow = rx.getScanWindow(windowId)
+                    runningWindow = scanWindow
+                    if rxBlock.status != ReceiverStatus.IDLE:
+                        raise Exception(f"Received new Scan Window {windowId} while not IDLE")
                     #print(f"Scanning window {windowId} on {str(rxBlock)}")
-                    rxBlock.runWindow(rx.getScanWindow(windowId), audio_sink_0, pipe)
-                    pipe.send([{'type': 'window_done', 'data': windowId}])
+                    rxBlock.setupWindow(scanWindow, audio_sink_0)
+                    rxBlock.startWindow()
+                elif item['type'] == "ChannelMute":
+                    ccId = item['data']['id']
+                    mute = item['data']['mute']
+                    for sw in rx._scanWindowsById.values():
+                        for c in sw.channels:
+                            if c.id == ccId:
+                                c.setMute(mute)
+                elif item['type'] == "ChannelSolo":
+                    ccId = item['data']['id']
+                    solo = item['data']['solo']
+                    for sw in rx._scanWindowsById.values():
+                        for c in sw.channels:
+                            if c.id == ccId:
+                                c.setSolo(solo)
+                elif item['type'] == "ChannelHold":
+                    ccId = item['data']['id']
+                    hold = item['data']['hold']
+                    for sw in rx._scanWindowsById.values():
+                        for c in sw.channels:
+                            if c.id == ccId:
+                                c.setHold(hold)
+                elif item['type'] == "ChannelForceActive":
+                    ccId = item['data']['id']
+                    forceActive = item['data']['forceActive']
+                    for sw in rx._scanWindowsById.values():
+                        for c in sw.channels:
+                            if c.id == ccId:
+                                c.setForceActive(forceActive)
 
+        ###
+        # Check Running Window
+
+        if rxBlock.status == ReceiverStatus.RUNNING_WINDOW:
+            rxBlock.checkWindow(pipe)
+
+        # Cleanup from finished Window
+
+        if rxBlock.status == ReceiverStatus.WINDOW_COMPLETE:
+            if runningWindow is not None:
+                pipe.send([{'type': 'window_done', 'data': runningWindow.id}])
+                runningWindow = None
+            rxBlock.teardownWindow(scanWindow, audio_sink_0)
+            rxBlock.status = ReceiverStatus.IDLE
+
+        time.sleep(0.001)
 

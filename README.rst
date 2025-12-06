@@ -149,6 +149,18 @@ The Noise Floor indication uses a long running average - since the Channels are 
 periods, it may take a while for this value to stabilize. (Currently uses a 60 second time constant,
 but may tune this in the future.)
 
+Clicking on a Channel enables interactive commands in the lower panel. Note that currently these status
+changes are not persisted, and will be reset upon Scanner restart. The following buttons are available:
+
+- **H** old: Locks the containing ScanWindow in the Receiver for continuous monitoring. Stops scanning for that receiver.
+- **S** olo: Mutes all other non-soloed Channels. (Multiple Channels can be Soloed simultaneously.)
+- **M** ute: Mutes the Channel - will still be scanned and can be Active.
+- **D** isable: Removes the Channel from the scan list.
+- **Disable 1 Hr**: Temporarily disables the Channel; it will be automatically re-enabled after 1 Hour.
+- **Play** - Breaks the Squelch and forces the Channel Active. For example, on a NOAA channel, bypass the EAS Alert detection and listen live.
+- **Pause** - Resets the Squelch from a Forced Active, or reset the Alert detection on an EAS Channel.
+
+
 Channel Modes
 =============
 
@@ -236,9 +248,6 @@ My non-committal TODO list:
   their volume.
 - **Automatic Adaptive Squelch**
 - **CTCSS Squelch**
-- **Channel Hold** - Interactively lock a Channel (and therefore it's containing ScanWindow) to a receiver
-  to monitor continuously.
-- **Channel Disable** - Interactively Disable a Channel permanently or for some time period (e.g., 1 Hour)
 - **Channel Grouping** - Enable / Disable Groups of Channels
 - **Channel Inactivity Alerting** - Alert if a Channel has been inactive for a specified period.
 - **Stereo Audio Support** - Manual or automatic assignment of Channels between Left and Right channels

@@ -2,7 +2,7 @@ from enum import IntEnum
 import math
 import numpy as np
 import time
-from typing import Any, Dict, List, Optional
+from typing import cast, Any, Dict, List, Optional
 import uuid
 
 from gnuradio import analog
@@ -29,6 +29,9 @@ class ChannelStatus(IntEnum):
     IDLE = 0
     ACTIVE = 1
     DWELL = 2
+    HOLD = 3
+    FORCE_ACTIVE = 4
+
 
 class ChannelMode(IntEnum):
     FM = 1
@@ -118,7 +121,7 @@ class MagToPowerLowPass_EmbeddedPythonBlock(gr.sync_block):
 
 
 class ChannelConfig():
-    def __init__(self, freq_hz: int, label: str, mode: ChannelMode=ChannelMode.FM, audioGain_dB: float=0, dwellTime_s: float=3.0, squelchThreshold:float=-55.0):
+    def __init__(self, freq_hz: int, label: str, mode: ChannelMode=ChannelMode.FM, audioGain_dB: float=0, dwellTime_s: float=3.0, squelchThreshold:float=-55.0, mute:bool=False, solo:Optional[bool]=None, hold:bool=False):
 
         self.id = uuid.uuid4()
 
@@ -129,6 +132,43 @@ class ChannelConfig():
         self.dwellTime_s = dwellTime_s  # Time to wait after active before continuing scan
         self.audioGain_dB = audioGain_dB
         self.squelchThreshold = squelchThreshold
+
+        self._enabled = True
+        self.disableUntil: Optional[float] = None
+        self.mute = mute
+        self.solo = solo
+        self.hold = hold
+        self.forceActive = False
+
+    def enable(self, enable: bool=True):
+        if enable:
+            self.disableUntil = None
+        self._enabled = enable
+
+    def isEnabled(self) -> bool:
+        if self.disableUntil is not None:
+            if time.time() > self.disableUntil:
+                self.disableUntil = None
+                return True
+            return False
+        return self._enabled
+
+    def setSolo(self, solo: Optional[bool]):
+        """
+        Solo mode - overrides Mute
+        Note: This is a tri-state setting
+
+        True - This Channel is unmuted
+        False - This Channel is muted
+        None - Solo inactive - use Mute setting
+        """
+        self.solo = solo
+        
+    def setHold(self, hold):
+        self.hold = hold
+
+    def setForceActive(self, forceActive):
+        self.forceActive = forceActive
 
     def debugPrint(self):
         print(f"    {self.freq_hz / 1e6:6.3f} {self.mode.name} {self.label}")
@@ -178,9 +218,25 @@ class ChannelConfig():
         cc = ChannelConfig(**kwargs)
         return cc
 
+    def asConfigDict(self):
+        return {
+            'id': self.id,
+            'freq_hz': self.freq_hz,
+            'label': self.label,
+            'mode': self.mode.name,
+            'dwellTime_s': self.dwellTime_s,
+            'audioGain_dB': self.audioGain_dB,
+            'squelchThreshold': self.squelchThreshold,
+            'enabled': self._enabled,
+            'disableUntil': self.disableUntil,
+            'mute': self.mute,
+            'solo': self.solo,
+            'hold': self.hold,
+        }
+
 
 class Channel():
-    def __init__(self, channelId, freq_hz: int, label: str, mode: ChannelMode, audioGain_dB: float, dwellTime_s: float, squelchThreshold:float, hardwareFreq_hz, rfSampleRate):
+    def __init__(self, channelId, freq_hz: int, label: str, mode: ChannelMode, audioGain_dB: float, dwellTime_s: float, squelchThreshold:float, hardwareFreq_hz, rfSampleRate, mute, solo, hold):
 
         self.id = channelId
 
@@ -191,13 +247,31 @@ class Channel():
         self.dwellTime_s = dwellTime_s  # Time to wait after active before continuing scan
         self.audioGain_dB = audioGain_dB
         self.squelchThreshold = squelchThreshold
+        self._mute = mute
+        self._solo = solo
+        self._hold = hold
+        self._forceActive = False
 
         self.hardwareFreq_hz = hardwareFreq_hz
 
         ###
         # Build Channel Block based on Mode
 
-        self.channelBlock = None
+        self.channelBlock = cast(ChannelBlock_Base, None)
+
+        chArgs = [
+            self.id,
+            self.label,
+            self._mute,
+            self._solo,
+            self._hold,
+            self.squelchThreshold,
+            self.audioGain_dB,
+            self.dwellTime_s,
+            self.freq_hz,
+            self.hardwareFreq_hz,
+            rfSampleRate
+        ]
 
         if mode in [ChannelMode.FM, ChannelMode.NFM]:
             deviation = 5000
@@ -205,82 +279,39 @@ class Channel():
                 deviation = 2500
 
             self.channelBlock = ChannelBlock_FM(
-                self.id,
-                self.label,
-                self.freq_hz,
-                self.hardwareFreq_hz,
+                *chArgs,
                 deviation,
-                self.audioGain_dB,
-                self.squelchThreshold,
-                self.dwellTime_s,
-                rfSampleRate=rfSampleRate
             )
+
         elif mode == ChannelMode.AM:
             self.channelBlock = ChannelBlock_AM(
-                self.id,
-                self.label,
-                self.freq_hz,
-                self.hardwareFreq_hz,
-                self.audioGain_dB,
-                self.squelchThreshold,
-                self.dwellTime_s,
-                rfSampleRate=rfSampleRate
+                *chArgs,
             )
         elif mode == ChannelMode.NOAA_EAS:
             self.channelBlock = ChannelBlock_EAS(
-                self.id,
-                self.label,
-                self.freq_hz,
-                self.hardwareFreq_hz,
-                5000,
-                self.audioGain_dB,
-                self.squelchThreshold,
-                self.dwellTime_s,
-                rfSampleRate=rfSampleRate,
+                *chArgs,
+                deviation_hz=5000,
                 alertTones=[1050],
             )
         elif mode == ChannelMode.BFM_EAS:
             self.channelBlock = ChannelBlock_EAS(
-                self.id,
-                self.label,
-                self.freq_hz,
-                self.hardwareFreq_hz,
-                75000,
-                self.audioGain_dB,
-                self.squelchThreshold,
-                self.dwellTime_s,
-                rfSampleRate=rfSampleRate,
+                *chArgs,
+                deviation_hz=75000,
                 alertTones=[853, 960],
             )
         elif mode == ChannelMode.USB:
             self.channelBlock = ChannelBlock_SSB(
-                self.id,
-                self.label,
-                self.freq_hz,
-                self.hardwareFreq_hz,
-                self.audioGain_dB,
-                self.squelchThreshold,
-                self.dwellTime_s,
-                rfSampleRate=rfSampleRate,
+                *chArgs,
                 upperNotLowerSideband=True,
             )
         elif mode == ChannelMode.LSB:
             self.channelBlock = ChannelBlock_SSB(
-                self.id,
-                self.label,
-                self.freq_hz,
-                self.hardwareFreq_hz,
-                self.audioGain_dB,
-                self.squelchThreshold,
-                self.dwellTime_s,
-                rfSampleRate=rfSampleRate,
+                *chArgs,
                 upperNotLowerSideband=False,
             )
 
-
-        if not self.channelBlock:
+        if self.channelBlock is None:
             raise Exception("Channel Block not Initialized - Check Mode setting")
-
 
     @classmethod
     def fromConfig(cls, cc: ChannelConfig, swc: "ScanWindowConfig"):
@@ -294,6 +325,9 @@ class Channel():
             squelchThreshold=cc.squelchThreshold,
             hardwareFreq_hz=swc.hardwareFreq_hz,
             rfSampleRate=swc.rfSampleRate,
+            mute=cc.mute,
+            solo=cc.solo,
+            hold=cc.hold,
         )
         return channel
 
@@ -303,25 +337,72 @@ class Channel():
     def getMinimumScanTime(self):
         return self.channelBlock.getMinimumScanTime()
 
+    def setMute(self, mute):
+        self._mute = mute
+        self.channelBlock.setMute(mute)
+
+    def setSolo(self, solo: Optional[bool]):
+        self._solo = solo
+        self.channelBlock.setSolo(solo)
+
+    def setHold(self, hold):
+        self._hold = hold
+        self.channelBlock.setHold(hold)
+
+    def setForceActive(self, forceActive):
+        self._forceActive = forceActive
+        self.channelBlock.setForceActive(forceActive)
+
 
 class ChannelBlock_Base(gr.hier_block2):
 
-    def __init__(self):
+    # Used to normalize volume from different modes
+    FIXED_AUDIO_GAIN_FACTOR = 1
+
+    def __init__(
+            self, 
+            channelId,
+            label: str,
+            mute: bool,
+            solo: Optional[bool],
+            hold: bool,
+            squelchThreshold: float,
+            audioGain_dB: float,
+            dwellTime_s: float,
+            ):
         gr.hier_block2.__init__(
             self, "_Channel",
                 gr.io_signature(1, 1, gr.sizeof_gr_complex*1),
                 gr.io_signature(1, 1, gr.sizeof_float*1),
         )
 
+        self.channelId = channelId
+        self._label = label
+        self._mute = mute
+        self._solo = solo
+        self._hold = hold
+        self._forceActive = False
+        self.squelchThreshold = squelchThreshold
+        self.audioGainFactor = dbToRatio(audioGain_dB) * self.FIXED_AUDIO_GAIN_FACTOR
+        self._dwellTime_s = dwellTime_s
+
         self._active = False
-        self._lastActive = 0
-        self._lastStatusReport = None
+        self._lastActive = 0.0
+        self._lastStatusReport: Optional[ChannelStatus] = None
         self._lastStatusTime = 0.0
 
-        self._rssi = None
-        self._noiseFloor_dBFS = None
-        self._volume_dBFS = None
+        self._rssi: Optional[float] = None
+        self._noiseFloor_dBFS: Optional[float] = None
+        self._volume_dBFS: Optional[float] = None
 
+        ###
+        # Output Mute
+
+        # Audio out from the implementation specific blocks must connect to this.
+
+        self.blockAudioMute = blocks.mute_ff(False)
+        self.connect((self.blockAudioMute, 0), (self, 0))
+        
         ###
         # Volume Blocks
 
@@ -353,37 +434,67 @@ class ChannelBlock_Base(gr.hier_block2):
     def getMinimumScanTime(self):
         return 0.1
 
+    def setMute(self, mute: bool=True):
+        self._mute = mute
+
+        finalMute = self._mute
+        if self._solo is not None:
+            if not self._solo:
+                finalMute = True
+
+        self.blockAudioMute.set_mute(finalMute)
+
+    def setSolo(self, solo: Optional[bool]):
+        self._solo = solo
+        self.setMute(self._mute)
+
+    def setHold(self, hold: bool):
+        self._hold = hold
+
+    def setForceActive(self, forceActive):
+        raise NotImplementedError()
+
 
 class ChannelBlock_FM(ChannelBlock_Base):
-    def __init__(self, channelId, label: str, channelFreq_hz: int, hardwareFreq_hz: int, deviation_hz: int, audioGain_dB: float, squelchThreshold: float, dwellTime_s: float, rfSampleRate):
-        super().__init__()
+    def __init__(
+            self,
+            channelId,
+            label: str,
+            mute: bool,
+            solo: Optional[bool],
+            hold: bool,
+            squelchThreshold: float,
+            audioGain_dB: float,
+            dwellTime_s: float,
+            channelFreq_hz: int,
+            hardwareFreq_hz: int,
+            rfSampleRate: int,
+            deviation_hz: int,
+        ):
+        super().__init__(
+            channelId,
+            label,
+            mute,
+            solo,
+            hold,
+            squelchThreshold,
+            audioGain_dB,
+            dwellTime_s,
+        )
 
-        self.channelId = channelId
-
-        self._label = label
         self._deviation_hz = deviation_hz
-        self._dwellTime_s = dwellTime_s
-        self.audioGainFactor = dbToRatio(audioGain_dB)
-        self.squelchThreshold = squelchThreshold
-
         if self._deviation_hz > AUDIO_SAMPLERATE:
             self.fmQuadRate = BFM_QUAD_RATE
         else:
             self.fmQuadRate = FM_QUAD_RATE
 
         freqOffset_Hz = channelFreq_hz - hardwareFreq_hz
-
-        ##################################################
-        # Parameters
-        ##################################################
         self.rfSampleRate = rfSampleRate
-
 
         if self.rfSampleRate % self.fmQuadRate != 0:
             raise Exception(f"RF Sample Rate ({self.rfSampleRate}) is not a multiple of FM Quad Rate ({self.fmQuadRate})")
 
         inputDecimation = self.rfSampleRate // self.fmQuadRate
-
         intermediateDecimation, xlatDecimation = _filterDec(inputDecimation)
 
         ##################################################
@@ -410,7 +521,6 @@ class ChannelBlock_FM(ChannelBlock_Base):
                 firdes.low_pass(1, self.rfSampleRate/xlatDecimation, half_bandwidth, half_bandwidth/4),
                 2
             )
-
         else:
             self.blockFreqXlatingFilter = gr_filter.freq_xlating_fir_filter_ccc(
                 self.rfSampleRate // self.fmQuadRate,
@@ -467,7 +577,7 @@ class ChannelBlock_FM(ChannelBlock_Base):
         ###
         # RF Chain
 
-        self.connect((self.blockAudioGain, 0), (self, 0))
+        self.connect((self.blockAudioGain, 0), (self.blockAudioMute, 0))
         self.connect((self.blockAudioFilter, 0), (self.blockAudioGain, 0))
         self.connect((self.blockAnalogNbfmRx, 0), (self.blockAudioFilter, 0))
         self.connect((self.blockAnalogPowerSquelch, 0), (self.blockAnalogNbfmRx, 0))
@@ -495,7 +605,7 @@ class ChannelBlock_FM(ChannelBlock_Base):
         self._connectVolume(self.blockAudioGain, 0)
 
     def setAudioGain(self, dB: float):
-        self.audioGainFactor = dbToRatio(dB)
+        self.audioGainFactor = dbToRatio(dB) * self.FIXED_AUDIO_GAIN_FACTOR
         self.blockAudioGain.set_k(self.audioGainFactor)
 
     def setSquelchValue(self, squelchThreshold):
@@ -503,11 +613,14 @@ class ChannelBlock_FM(ChannelBlock_Base):
         self.blockAnalogPowerSquelch.set_threshold(squelchThreshold)
 
     def getStatus(self, statusPipe):
-        status = ChannelStatus.IDLE
+        status = ChannelStatus.HOLD if self._hold else ChannelStatus.IDLE
         if self.blockAnalogPowerSquelch.unmuted():
             self._active = True
             self._lastActive = time.time()
-            status = ChannelStatus.ACTIVE
+            if self._forceActive:
+                status = ChannelStatus.FORCE_ACTIVE
+            else:
+                status = ChannelStatus.ACTIVE
         else:
             self._active = False
             if time.time() - self._lastActive < self._dwellTime_s:
@@ -530,30 +643,52 @@ class ChannelBlock_FM(ChannelBlock_Base):
 
         return status
 
+    def setForceActive(self, forceActive):
+        self._forceActive = forceActive
+        if forceActive:
+            # Open Squelch
+            self.blockAnalogPowerSquelch.set_threshold(-150.0)
+        else:
+            # Reset Squelch
+            self.setSquelchValue(self.squelchThreshold)
+
 
 class ChannelBlock_AM(ChannelBlock_Base):
 
     FIXED_AUDIO_GAIN_FACTOR = 3
 
-    def __init__(self, channelId, label: str, channelFreq_hz: int, hardwareFreq_hz: int, audioGain_dB: float, squelchThreshold: float, dwellTime_s: float, rfSampleRate):
-        super().__init__()
-
-        self.channelId = channelId
-
-        self._label = label
-        self._dwellTime_s = dwellTime_s
-        self.audioGainFactor = dbToRatio(audioGain_dB) * self.FIXED_AUDIO_GAIN_FACTOR
-        self.squelchThreshold = squelchThreshold
+    def __init__(
+            self,
+            channelId,
+            label: str,
+            mute: bool,
+            solo: Optional[bool],
+            hold: bool,
+            squelchThreshold: float,
+            audioGain_dB: float,
+            dwellTime_s: float,
+            channelFreq_hz: int,
+            hardwareFreq_hz: int,
+            rfSampleRate: int,
+        ):
+        super().__init__(
+            channelId,
+            label,
+            mute,
+            solo,
+            hold,
+            squelchThreshold,
+            audioGain_dB,
+            dwellTime_s,
+        )
 
         freqOffset_Hz = channelFreq_hz - hardwareFreq_hz
-
-        ##################################################
-        # Parameters
-        ##################################################
         self.rfSampleRate = rfSampleRate
 
-        inputDecimation = self.rfSampleRate // AUDIO_SAMPLERATE
+        if self.rfSampleRate % AUDIO_SAMPLERATE != 0:
+            raise Exception(f"RF Sample Rate ({self.rfSampleRate}) is not a multiple of Audio Sample Rate ({AUDIO_SAMPLERATE})")
 
+        inputDecimation = self.rfSampleRate // AUDIO_SAMPLERATE
         intermediateDecimation, xlatDecimation = _filterDec(inputDecimation)
 
         ##################################################
@@ -634,7 +769,7 @@ class ChannelBlock_AM(ChannelBlock_Base):
         ###
         # RF Chain
 
-        self.connect((self.blockAudioGain, 0), (self, 0))
+        self.connect((self.blockAudioGain, 0), (self.blockAudioMute, 0))
         self.connect((self.blockAudioFilter, 0), (self.blockAudioGain, 0))
         self.connect((self.blockAnalogAMDemod, 0), (self.blockAudioFilter, 0))
         self.connect((self.blockAnalogAgc, 0), (self.blockAnalogAMDemod, 0))
@@ -664,19 +799,23 @@ class ChannelBlock_AM(ChannelBlock_Base):
         self._connectVolume(self.blockAudioGain, 0)
 
     def setAudioGain(self, dB: float):
-        self.audioGainFactor = dbToRatio(dB)
-        self.blockAudioGain.set_k(self.audioGainFactor * self.FIXED_AUDIO_GAIN_FACTOR)
+        self.audioGainFactor = dbToRatio(dB) * self.FIXED_AUDIO_GAIN_FACTOR
+        self.blockAudioGain.set_k(self.audioGainFactor)
 
     def setSquelchValue(self, squelchThreshold):
         self.squelchThreshold = squelchThreshold
         self.blockAnalogPowerSquelch.set_threshold(squelchThreshold)
 
     def getStatus(self, statusPipe):
-        status = ChannelStatus.IDLE
+        status = ChannelStatus.HOLD if self._hold else ChannelStatus.IDLE
         if self.blockAnalogPowerSquelch.unmuted():
             self._active = True
             self._lastActive = time.time()
-            status = ChannelStatus.ACTIVE
+            if self._forceActive:
+                status = ChannelStatus.FORCE_ACTIVE
+            else:
+                status = ChannelStatus.ACTIVE
+
         else:
             self._active = False
             if time.time() - self._lastActive < self._dwellTime_s:
@@ -698,6 +837,15 @@ class ChannelBlock_AM(ChannelBlock_Base):
                 }])
 
         return status
+
+    def setForceActive(self, forceActive):
+        self._forceActive = forceActive
+        if forceActive:
+            # Open Squelch
+            self.blockAnalogPowerSquelch.set_threshold(-150.0)
+        else:
+            # Reset Squelch
+            self.setSquelchValue(self.squelchThreshold)
 
 
 class ToneDetect_EmbeddedPythonBlock(gr.sync_block):
@@ -736,7 +884,7 @@ class ToneDetect_EmbeddedPythonBlock(gr.sync_block):
             # Ensure each tone freq is above the threshold
             active = True
             for i in self.testIndexes:
-                print(f"{inVec[i-1]} {inVec[i]} {inVec[i+1]} {refPwr}")
+#                print(f"{inVec[i-1]} {inVec[i]} {inVec[i+1]} {refPwr}")
                 if inVec[i] - refPwr < THRESHOLD or inVec[i] < inVec[i-1] or inVec[i] < inVec[i+1]:
                     active = False
                     break
@@ -747,18 +895,36 @@ class ToneDetect_EmbeddedPythonBlock(gr.sync_block):
 
 class ChannelBlock_EAS(ChannelBlock_Base):
 
-    def __init__(self, channelId, label: str, channelFreq_hz: int, hardwareFreq_hz: int, deviation_hz: int, audioGain_dB: float, squelchThreshold: float, dwellTime_s: float, rfSampleRate, alertTones: List[int]):
+    def __init__(
+            self,
+            channelId,
+            label: str,
+            mute: bool,
+            solo: Optional[bool],
+            hold: bool,
+            squelchThreshold: float,
+            audioGain_dB: float,
+            dwellTime_s: float,
+            channelFreq_hz: int,
+            hardwareFreq_hz: int,
+            rfSampleRate: int,
+            deviation_hz: int,
+            alertTones: List[int],
+        ):
+        super().__init__(
+            channelId,
+            label,
+            mute,
+            solo,
+            hold,
+            squelchThreshold,
+            audioGain_dB,
+            dwellTime_s,
+        )
 
-        super().__init__()
-
-        self.channelId = channelId
-        self._label = label
-        self._dwellTime_s = dwellTime_s
         self._triggerCount = 0
-
         self._alertTones = alertTones
-
-        self._timeoutTime = 0
+        self._timeoutTime = 0.0
 
         ##################################################
         # Blocks
@@ -770,13 +936,16 @@ class ChannelBlock_EAS(ChannelBlock_Base):
         self.blockFM = ChannelBlock_FM(
             channelId,
             label,
+            mute,
+            solo,
+            hold,
+            squelchThreshold,
+            audioGain_dB,
+            dwellTime_s,
             channelFreq_hz,
             hardwareFreq_hz,
+            rfSampleRate,
             deviation_hz,
-            audioGain_dB,
-            squelchThreshold,
-            dwellTime_s,
-            rfSampleRate
         )
 
         ###
@@ -805,7 +974,7 @@ class ChannelBlock_EAS(ChannelBlock_Base):
             fftSize=FFT_SIZE
         )
 
-        self.blockAudioMute = blocks.mute_ff(True)
+        self.blockEASAudioMute = blocks.mute_ff(True)
 
         ##################################################
         # Connections
@@ -814,8 +983,8 @@ class ChannelBlock_EAS(ChannelBlock_Base):
         self.connect((self.blockLogPowerFFT, 0), (self.blockToneDetect, 0))
         self.connect((self.blockFM, 0), (self.blockLogPowerFFT, 0))
 
-        self.connect((self.blockAudioMute, 0), (self, 0))
-        self.connect((self.blockFM, 0), (self.blockAudioMute, 0))
+        self.connect((self.blockEASAudioMute, 0), (self.blockAudioMute, 0))
+        self.connect((self.blockFM, 0), (self.blockEASAudioMute, 0))
         self.connect((self, 0), (self.blockFM, 0))
         
     def activeCb(self, isActive: bool):
@@ -828,7 +997,7 @@ class ChannelBlock_EAS(ChannelBlock_Base):
             self._triggerCount += 1
             print(f"** EAS Trigger Count: {self._triggerCount}")
             if self._triggerCount >= 3:
-                self.blockAudioMute.set_mute(False)
+                self.blockEASAudioMute.set_mute(False)
                 self._active = True
                 self._lastActive = time.time()
                 self._timeoutTime = self._lastActive + self._dwellTime_s
@@ -836,13 +1005,16 @@ class ChannelBlock_EAS(ChannelBlock_Base):
             self._triggerCount = 0
 
     def getStatus(self, statusPipe):
-        status = ChannelStatus.IDLE
-        if self._active:
+        status = ChannelStatus.HOLD if self._hold else ChannelStatus.IDLE
+        if self._active or self._forceActive:
             self._active = True
-            status = ChannelStatus.ACTIVE
-            if time.time() > self._timeoutTime:
-                self._active = False
-                self.blockAudioMute.set_mute(True)
+            if self._forceActive:
+                status = ChannelStatus.FORCE_ACTIVE
+            else:
+                status = ChannelStatus.ACTIVE
+                if time.time() > self._timeoutTime:
+                    self._active = False
+                    self.blockEASAudioMute.set_mute(True)
         elif self._triggerCount > 0:
             # in a pre-trigger state - keep the window active
             status = ChannelStatus.DWELL
@@ -867,30 +1039,57 @@ class ChannelBlock_EAS(ChannelBlock_Base):
     def getMinimumScanTime(self):
         return 0.2
 
+# TODO set Volume / Squelch
+
+    def setForceActive(self, forceActive):
+        self._forceActive = forceActive
+        if forceActive:
+            # Open Squelch
+            self.blockFM.blockAnalogPowerSquelch.set_threshold(-150.0)
+            self.blockEASAudioMute.set_mute(False)
+            self._active = True
+        else:
+            # Reset Squelch
+            self.blockFM.setSquelchValue(self.blockFM.squelchThreshold)
+            self._timeoutTime = 0.0
+
 
 class ChannelBlock_SSB(ChannelBlock_Base):
 
     FIXED_AUDIO_GAIN_FACTOR = 50
 
-    def __init__(self, channelId, label: str, channelFreq_hz: int, hardwareFreq_hz: int, audioGain_dB: float, squelchThreshold: float, dwellTime_s: float, rfSampleRate, upperNotLowerSideband: bool):
-        super().__init__()
+    def __init__(
+            self,
+            channelId,
+            label: str,
+            mute: bool,
+            solo: Optional[bool],
+            hold: bool,
+            squelchThreshold: float,
+            audioGain_dB: float,
+            dwellTime_s: float,
+            channelFreq_hz: int,
+            hardwareFreq_hz: int,
+            rfSampleRate: int,
+            upperNotLowerSideband: bool,
+        ):
+        super().__init__(
+            channelId,
+            label,
+            mute,
+            solo,
+            hold,
+            squelchThreshold,
+            audioGain_dB,
+            dwellTime_s,
+        )
 
-        self.channelId = channelId
-
-        self._label = label
-        self._dwellTime_s = dwellTime_s
-        self.audioGainFactor = dbToRatio(audioGain_dB) * self.FIXED_AUDIO_GAIN_FACTOR
-        self.squelchThreshold = squelchThreshold
         self.upperNotLowerSideband = upperNotLowerSideband
 
-        ##################################################
-        # Parameters
-        ##################################################
         self.rfSampleRate = rfSampleRate
 
         ifFreq = FM_QUAD_RATE
         ifSampleRate = BFM_QUAD_RATE
-
         freqOffset_Hz = channelFreq_hz - hardwareFreq_hz - ifFreq
 
         if self.upperNotLowerSideband:
@@ -899,6 +1098,9 @@ class ChannelBlock_SSB(ChannelBlock_Base):
         else:
             ifPassbandLow = ifFreq - 3000
             ifPassbandHigh = ifFreq
+
+        if self.rfSampleRate % ifSampleRate != 0:
+            raise Exception(f"RF Sample Rate ({self.rfSampleRate}) is not a multiple of IF Sample Rate ({ifSampleRate})")
 
         inputDecimation = self.rfSampleRate // ifSampleRate
 
@@ -954,9 +1156,9 @@ class ChannelBlock_SSB(ChannelBlock_Base):
         )
         self.blockAnalogAgc.set_max_gain(3.0)
 
-
         self.blockComplexToReal = blocks.complex_to_real(1)
 
+        # BFO and mixer
         self.blockIfOsc = analog.sig_source_f(ifSampleRate, analog.GR_COS_WAVE, ifFreq, 1, 0, 0)
         self.blockIfMultiply = blocks.multiply_vff(1)
 
@@ -992,7 +1194,7 @@ class ChannelBlock_SSB(ChannelBlock_Base):
         ###
         # RF Chain
 
-        self.connect((self.blockAudioGain, 0), (self, 0))
+        self.connect((self.blockAudioGain, 0), (self.blockAudioMute, 0))
         self.connect((self.blockAudioFilter, 0), (self.blockAudioGain, 0))
         self.connect((self.blockIfMultiply, 0), (self.blockAudioFilter, 0))
         self.connect((self.blockIfOsc, 0), (self.blockIfMultiply, 1))
@@ -1023,19 +1225,22 @@ class ChannelBlock_SSB(ChannelBlock_Base):
         self._connectVolume(self.blockAudioGain, 0)
 
     def setAudioGain(self, dB: float):
-        self.audioGainFactor = dbToRatio(dB)
-        self.blockAudioGain.set_k(self.audioGainFactor * self.FIXED_AUDIO_GAIN_FACTOR)
+        self.audioGainFactor = dbToRatio(dB) * self.FIXED_AUDIO_GAIN_FACTOR
+        self.blockAudioGain.set_k(self.audioGainFactor)
 
     def setSquelchValue(self, squelchThreshold):
         self.squelchThreshold = squelchThreshold
         self.blockAnalogPowerSquelch.set_threshold(squelchThreshold)
 
     def getStatus(self, statusPipe):
-        status = ChannelStatus.IDLE
+        status = ChannelStatus.HOLD if self._hold else ChannelStatus.IDLE
         if self.blockAnalogPowerSquelch.unmuted():
             self._active = True
             self._lastActive = time.time()
-            status = ChannelStatus.ACTIVE
+            if self._forceActive:
+                status = ChannelStatus.FORCE_ACTIVE
+            else:
+                status = ChannelStatus.ACTIVE
         else:
             self._active = False
             if time.time() - self._lastActive < self._dwellTime_s:
@@ -1057,4 +1262,13 @@ class ChannelBlock_SSB(ChannelBlock_Base):
                 }])
 
         return status
+
+    def setForceActive(self, forceActive):
+        self._forceActive = forceActive
+        if forceActive:
+            # Open Squelch
+            self.blockAnalogPowerSquelch.set_threshold(-150.0)
+        else:
+            # Reset Squelch
+            self.setSquelchValue(self.squelchThreshold)
 

@@ -14,15 +14,35 @@ class ConfigListModel(dv.DataViewIndexListModel):
         self.channelIdToRow = {}
         self.rowStatus = {}
 
+        self.resetConfig(data)
+
+    def resetConfig(self, data):
+
+        # Brute force config update, just rebuild all
+
+        self.DeleteAllRows()
+        self.channelIdToRow = {}
+        self.rowStatus = {}
+
+        for r in data:
+            self.AddRow(r)
+
         for i in range(0, len(self.data)):
             cc = self.data[i]
             self.channelIdToRow[cc.id] = i
             self.rowStatus[i] = None
 
+        self.Cleared()
+
     def SetChannelStatus(self, channelId, status: ChannelStatus):
         rowId = self.channelIdToRow[channelId]
         item = self.GetItem(rowId)
         self.rowStatus[rowId] = status
+        self.ItemChanged(item)
+
+    def channelConfigUpdated(self, channelId):
+        rowId = self.channelIdToRow[channelId]
+        item = self.GetItem(rowId)
         self.ItemChanged(item)
 
     def GetColumnType(self, col):
@@ -34,16 +54,32 @@ class ConfigListModel(dv.DataViewIndexListModel):
         if col == 0:
             return f"{cc.freq_hz/1e6:6.3f}"
         elif col == 1:
-            return cc.label
+            return str(cc.label)
         elif col == 2:
-            return cc.mode.name
+            statusText = ""
+            if not cc.isEnabled():
+                if cc.disableUntil is not None:
+                    statusText = "Temp Disabled"
+                else:
+                    statusText = "Disabled"
+            elif cc.forceActive:
+                statusText = "Force Active"
+            elif cc.mute:
+                statusText = "Mute"
+            elif cc.solo:
+                statusText = "Solo"
+            elif self.rowStatus.get(row) is not None and self.rowStatus[row] != ChannelStatus.IDLE:
+                statusText = self.rowStatus[row].name
+            return statusText
         elif col == 3:
-            return str(cc.squelchThreshold)
+            return cc.mode.name
         elif col == 4:
-            return str(cc.dwellTime_s)
+            return str(cc.squelchThreshold)
         elif col == 5:
-            return str(cc.audioGain_dB)
+            return str(cc.dwellTime_s)
         elif col == 6:
+            return str(cc.audioGain_dB)
+        elif col == 7:
             return str(cc.id)
 
         raise Exception(f"Invalid col: {col}")
@@ -54,7 +90,7 @@ class ConfigListModel(dv.DataViewIndexListModel):
 
     # Report how many columns this model provides data for.
     def GetColumnCount(self):
-        return 7
+        return 8
 
     # Report the number of rows in the model
     def GetCount(self):
@@ -62,14 +98,18 @@ class ConfigListModel(dv.DataViewIndexListModel):
 
     # Called to check if non-standard attributes should be used in the cell at (row, col)
     def GetAttrByRow(self, row, col, attr):
+        setColour = None
         if self.rowStatus[row] == ChannelStatus.ACTIVE:
-            attr.SetColour('green')
+            setColour = 'green'
+        elif self.rowStatus[row] in [ ChannelStatus.DWELL, ChannelStatus.FORCE_ACTIVE ]:
+            setColour = wx.Colour(192, 192, 0)
+
+        if (not self.data[row].isEnabled()) or self.data[row].mute or self.data[row].solo:
+            setColour = 'red'
+        if setColour is not None:
             # apparently only supported in wxGTK 4.1+ - use text color for now
             #attr.SetBackgroundColour('green')
-            attr.SetBold(True)
-            return True
-        if self.rowStatus[row] == ChannelStatus.DWELL:
-            attr.SetColour(wx.Colour(192, 192, 0))
+            attr.SetColour(setColour)
             attr.SetBold(True)
             return True
         return False
@@ -87,12 +127,15 @@ class ConfigListModel(dv.DataViewIndexListModel):
         row2 = self.GetRow(item2)
         a = self.GetValueByRow(row1, col)
         b = self.GetValueByRow(row2, col)
-        if col in [0, 3, 4, 5]:
+        if col in [0, 4, 5, 6]:
             a = float(a)
             b = float(b)
         if a < b: return -1
         if a > b: return 1
         return 0
+
+    def DeleteAllRows(self):
+        self.DeleteRows(range(0, len(self.data)))
 
     def DeleteRows(self, rows):
         # make a copy since we'll be sorting(mutating) the list
@@ -127,13 +170,16 @@ class ConfigDisplayFrame(wx.Frame):
             cls._instance = super().__new__(cls, *args, **kwargs)
         return cls._instance
 
-    def __init__(self, scanner: Scanner, *args, **kw):
+    def __init__(self, scanner: Scanner, channelSelectCb, *args, **kw):
 
         if self._frameInitialized:
             return
         self._frameInitialized = True
         
         super().__init__(*args, **kw)
+
+        self._scanner = scanner
+        self._channelSelectCb = channelSelectCb
 
         self.panel = wx.Panel(self)
 
@@ -153,6 +199,12 @@ class ConfigDisplayFrame(wx.Frame):
         )
         self.dvlc.AppendTextColumn("Label",
             width=150,
+            flags=dv.DATAVIEW_COL_RESIZABLE | dv.DATAVIEW_COL_SORTABLE,
+            mode=dv.DATAVIEW_CELL_INERT
+        )
+        self.dvlc.AppendTextColumn(
+            "Status",
+            width=75,
             flags=dv.DATAVIEW_COL_RESIZABLE | dv.DATAVIEW_COL_SORTABLE,
             mode=dv.DATAVIEW_CELL_INERT
         )
@@ -186,21 +238,41 @@ class ConfigDisplayFrame(wx.Frame):
             flags=dv.DATAVIEW_COL_RESIZABLE | dv.DATAVIEW_COL_SORTABLE,
             mode=dv.DATAVIEW_CELL_INERT
         )
-    
-        # Build Data from Config
-        channelData = []
-        for cc in scanner.channelConfigs:
-            channelData.append(cc)
+
+        self.dvlc.Bind(wx.dataview.EVT_DATAVIEW_SELECTION_CHANGED, self.onSelectChannel)
 
         # Associate Model
-        self.dataModel = ConfigListModel(channelData)
+        self.dataModel = ConfigListModel([])
         self.dvlc.AssociateModel(self.dataModel)
 
+        self.resetConfig()
 
         self.sizer.Add(self.dvlc, 1, wx.EXPAND | wx.ALL, 10)
         self.panel.SetSizer(self.sizer)
         self.Layout()
 
+    def onSelectChannel(self, event):
+        item = event.GetItem()
+        rowId = self.dataModel.GetRow(item)
+        try:
+            cc = self.dataModel.data[rowId]
+            if cc:
+                self._channelSelectCb(cc.id)
+        except IndexError:
+            return
+
+    def resetConfig(self):
+        # Build Data from Config
+        channelData = []
+        for cc in self._scanner.channelConfigs:
+            channelData.append(cc)
+
+        self.dataModel.resetConfig(channelData)
+        self.Layout()
+
     def SetChannelStatus(self, channelId, status: ChannelStatus):
         self.dataModel.SetChannelStatus(channelId, status)
+
+    def channelConfigUpdated(self, channelId):
+        self.dataModel.channelConfigUpdated(channelId)
 

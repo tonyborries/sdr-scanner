@@ -1,5 +1,8 @@
 import argparse
 import datetime
+import queue
+import signal
+import sys
 
 from sdr_scanner.Scanner import Scanner
 
@@ -12,9 +15,11 @@ def main():
 
     args = parser.parse_args()
 
-
     ###
     # Setup Scanner
+
+    scannerToUiQueue = queue.Queue()
+    #uiToScannerQueue = queue.Queue()
 
     scanner = Scanner.fromConfigFile(args.config)
 
@@ -24,9 +29,20 @@ def main():
 
     lastChannelStatusById = {}
 
-    def scanWindowStartCb(scanWindowId, rxId):
-#        print(f"Scan Window {scanWindowId} on {rxId}")
-        pass
+    def _processScannerDataCb():
+        try:
+            while True:
+                data = scannerToUiQueue.get(False)
+                if data['type'] == "ChannelStatus":
+                    channelStatusCb(data["data"])
+                elif data['type'] == "ScanWindowDone":
+                    scanWindowDoneCb(data['data']['id'])
+
+                scannerToUiQueue.task_done()
+        except queue.Empty:
+            pass
+
+
 
     def scanWindowDoneCb(scanWindowId):
 #        print(f"Scan Window Done: {scanWindowId}")
@@ -43,9 +59,17 @@ def main():
             print(f"\n {datetime.datetime.now().time().isoformat()[0:8]}  {channel.label} ({channel.freq_hz/1e6})")
         lastChannelStatusById[channelId] = status
 
-    scanner.addChannelStatusCb(channelStatusCb)
-    scanner.addScanWindowStartCb(scanWindowStartCb)
-    scanner.addScanWindowDoneCb(scanWindowDoneCb)
+    #scanner.addInputQueue(uiToScannerQueue)
+    scanner.addOutputQueue(scannerToUiQueue)
+    scanner.addProcessQueueCallback(_processScannerDataCb)
+
+    
+    def sig_handler(sig=None, frame=None):
+        scanner.stop()
+        sys.exit(0)
+        
+    signal.signal(signal.SIGINT, sig_handler)
+    signal.signal(signal.SIGTERM, sig_handler)
 
     ###
     # Run

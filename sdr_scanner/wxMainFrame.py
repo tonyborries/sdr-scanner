@@ -1,13 +1,20 @@
 import datetime
+from functools import partial
+import os.path
+import queue
 import threading
 import time
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 import wx
 import wx.dataview as dv
 
 from .Channel import ChannelConfig, ChannelStatus
 from .Scanner import Scanner
 from .wxConfigDisplayFrame import ConfigDisplayFrame
+
+
+scannerToUiQueue = queue.Queue()
+uiToScannerQueue = queue.Queue()
 
 
 class StoppableThread(threading.Thread):
@@ -19,16 +26,16 @@ class StoppableThread(threading.Thread):
         self._stop_event = threading.Event()
 
 
-    def stop(self):
+    def stop(self) -> None:
         self._stop_event.set()
 
-    def stopped(self):
+    def stopped(self) -> None:
         return self._stop_event.is_set()
 
 
 class ScannerControlThread(StoppableThread):
 
-    def __init__(self, scanner: Scanner, channelStatusCb, scanWindowStartCb, scanWindowDoneCb, *args, **kwargs):
+    def __init__(self, scanner: Scanner, processScannerDataFn, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
         ###
@@ -36,34 +43,29 @@ class ScannerControlThread(StoppableThread):
 
         self.scanner = scanner
 
-        self.parent_channelStatusCb = channelStatusCb
-        self.parent_scanWindowStartCb = scanWindowStartCb
-        self.parent_scanWindowDoneCb = scanWindowDoneCb
+        self._parent_processScannerDataFn = processScannerDataFn
 
-        self.scanner.addChannelStatusCb(self.channelStatusCb)
-        self.scanner.addScanWindowStartCb(self.scanWindowStartCb)
-        self.scanner.addScanWindowDoneCb(self.scanWindowDoneCb)
+        self.scanner.addInputQueue(uiToScannerQueue)
+        self.scanner.addOutputQueue(scannerToUiQueue)
+        self.scanner.addProcessQueueCallback(self.processScannerDataCb)
 
-
-    def run(self):
+    def run(self) -> None:
         self.scanner.runReceiverProcesses()
 
-    def stop(self):
+    def stop(self) -> None:
         super().stop()
         self.scanner.stop()
 
-    def scanWindowStartCb(self, scanWindowId, rxId):
-        wx.CallAfter(self.parent_scanWindowStartCb, scanWindowId, rxId)
-
-    def scanWindowDoneCb(self, scanWindowId):
-        wx.CallAfter(self.parent_scanWindowDoneCb, scanWindowId)
-
-    def channelStatusCb(self, data):
-        wx.CallAfter(self.parent_channelStatusCb, data)
-
+    def processScannerDataCb(self) -> None:
+        wx.CallAfter(self._parent_processScannerDataFn)
+        
 
 class BasePanelManager():
-    def getPanel(self):
+    def __init__(self, parentPanel):
+        self.parentPanel = parentPanel
+        self.panel = wx.Panel(parentPanel)
+
+    def getPanel(self) -> wx.Panel:
         return self.panel
 
 
@@ -78,9 +80,10 @@ class RSSIDisplayPanelManager(BasePanelManager):
     VOLUME_PANEL_WIDTH = NOISEFLOOR_LABEL_WIDTH
     VOLUME_PANEL_HEIGHT = 10
 
-    def __init__(self, parentPanel):
-        self.parentPanel = parentPanel
-        self.panel = wx.Panel(parentPanel)
+    def __init__(self, parentPanel, channelSelectCb):
+        super().__init__(parentPanel)
+
+        self._channelSelectCb = channelSelectCb
 
         sizer = wx.BoxSizer(wx.VERTICAL)
 
@@ -95,7 +98,7 @@ class RSSIDisplayPanelManager(BasePanelManager):
 
         self.stLabel = wx.StaticText(
             self.panel,
-            label=f"",
+            label="",
             size=(self.LABEL_WIDTH, -1)
         )
         font = self.stLabel.GetFont()
@@ -110,7 +113,7 @@ class RSSIDisplayPanelManager(BasePanelManager):
 
         self.stNoiseFloor = wx.StaticText(
             self.panel,
-            label=f"",
+            label="",
             size=(self.NOISEFLOOR_LABEL_WIDTH, -1)
         )
         font = self.stNoiseFloor.GetFont()
@@ -127,12 +130,24 @@ class RSSIDisplayPanelManager(BasePanelManager):
 
         self.panel.SetSizer(sizer)
 
+        # Capture clicking on the panel - have to bind to all items because MouseEvents don't propagate up
+        self.panel.Bind(wx.EVT_LEFT_DOWN, self.onMouseDown)
+        self.meterPanel.Bind(wx.EVT_LEFT_DOWN, self.onMouseDown)
+        self.stLabel.Bind(wx.EVT_LEFT_DOWN, self.onMouseDown)
+        self.stNoiseFloor.Bind(wx.EVT_LEFT_DOWN, self.onMouseDown)
+        self.volumePanel.Bind(wx.EVT_LEFT_DOWN, self.onMouseDown)
+
         self.meterPanel.Bind(wx.EVT_PAINT, self.OnPaintRSSI)
         self.volumePanel.Bind(wx.EVT_PAINT, self.OnPaintVolume)
 
-        self.rssi_dBFS = -999
-        self.rssiOverThreshold = -999
+        self.rssi_dBFS: Optional[float] = None
+        self.rssiOverThreshold: Optional[float] = None
+        self.noiseFloor_dBFS: Optional[float] = None
         self._volume_dBFS: Optional[float] = -999.9
+
+    def onMouseDown(self, event):
+        self._channelSelectCb()
+        event.Skip()
 
     def OnPaintRSSI(self, event):
         # Create a Device Context (DC) for painting the panel
@@ -142,7 +157,7 @@ class RSSIDisplayPanelManager(BasePanelManager):
 
         i = 0
         for db in [0, 10, 20, 30]:
-            if self.rssiOverThreshold > db:
+            if self.rssiOverThreshold is not None and self.rssiOverThreshold > db:
                 dc.SetBrush(wx.Brush('black', wx.SOLID))
             else:
                 dc.SetBrush(wx.Brush('black', wx.BRUSHSTYLE_TRANSPARENT))
@@ -199,13 +214,14 @@ class RSSIDisplayPanelManager(BasePanelManager):
 class ChannelStripPanelManager(BasePanelManager):
 
     LABEL_WIDTH = 250
+#    LABEL_HEIGHT = 40
     FREQ_WIDTH = 120
 
     DISPLAY_TIMEOUT_S = 15
 
-    def __init__(self, parentPanel, channelConfig: ChannelConfig):
-        self.parentPanel = parentPanel
-        self.panel = wx.Panel(parentPanel)
+    def __init__(self, parentPanel, channelConfig: ChannelConfig, channelSelectCb):
+        super().__init__(parentPanel)
+        self._channelSelectCb = channelSelectCb
 
         sizer = wx.BoxSizer(wx.HORIZONTAL)
 
@@ -234,19 +250,27 @@ class ChannelStripPanelManager(BasePanelManager):
         )
         labelSizer.Add(stFreq, 0, wx.BOTTOM, 2)
 
-
         sizer.Add(labelSizer, 0, 0, 0)
 
         # RSSI
-        self.rssiPM = RSSIDisplayPanelManager(self.panel)
+        self.rssiPM = RSSIDisplayPanelManager(self.panel, partial(self._channelSelectCb, channelConfig.id))
         sizer.Add(self.rssiPM.getPanel(), 0, wx.RESERVE_SPACE_EVEN_IF_HIDDEN, 0)
 
+        # Mouse Click
+        self.panel.Bind(wx.EVT_LEFT_DOWN, self.onMouseDown)
+        stLabel.Bind(wx.EVT_LEFT_DOWN, self.onMouseDown)
+        stFreq.Bind(wx.EVT_LEFT_DOWN, self.onMouseDown)
+        self.rssiPM.getPanel().Bind(wx.EVT_LEFT_DOWN, self.onMouseDown)
 
         self.panel.SetSizer(sizer)
 
         self._lastActive = 0.0
         self._lastStatus: Optional[ChannelStatus] = None
         self._isHidden = False
+
+    def onMouseDown(self, event: wx.MouseEvent):
+        self._channelSelectCb(self.channelConfig.id)
+        event.Skip()
 
     def setRSSI(self, rssi: float, noiseFloor: Optional[float]):
         rssiOverThreshold = rssi - self.channelConfig.squelchThreshold
@@ -262,13 +286,24 @@ class ChannelStripPanelManager(BasePanelManager):
             self._lastActive = time.time()
             bgColor = wx.Colour(0, 192, 0)
         elif status == ChannelStatus.DWELL:
+            self._lastActive = time.time()
             bgColor = wx.Colour(192, 192, 0)
+        elif status == ChannelStatus.HOLD:
+            self._lastActive = time.time()
+            bgColor = wx.Colour(192, 192, 0)
+        elif status == ChannelStatus.FORCE_ACTIVE:
+            self._lastActive = time.time()
+            bgColor = wx.Colour(224, 96, 96)
 
         if status != self._lastStatus:
             self.panel.SetBackgroundColour(bgColor)
             self._lastStatus = status
             self.panel.Refresh()
             self.updateHiddenStatus()
+
+    def channelConfigUpdated(self):
+        self.panel.Refresh()
+        self.updateHiddenStatus()
 
     def updateHiddenStatus(self):
         shouldHide = time.time() - self._lastActive > self.DISPLAY_TIMEOUT_S
@@ -284,33 +319,46 @@ class ChannelStripPanelManager(BasePanelManager):
         """
         Called periodically to see if the channel should be timed out and hidden
         """
-        if self._lastStatus == ChannelStatus.ACTIVE:
+        if self._lastStatus in [ChannelStatus.ACTIVE, ChannelStatus.FORCE_ACTIVE]:
             self._lastActive = time.time()
         self.updateHiddenStatus()
-
 
 
 class ActiveChannelPanelManager(BasePanelManager):
     """
     Creates a Panel for displaying and managing the active Channels
     """
-    def __init__(self, parentPanel, channelConfigs: List[ChannelConfig]):
+    def __init__(self, parentPanel, channelConfigs: List[ChannelConfig], channelSelectCb):
+        self._channelSelectCb = channelSelectCb
         self.parentPanel = parentPanel
         self.panel = wx.Panel(parentPanel)
 
-        sizer = wx.BoxSizer(wx.VERTICAL)
+        self.sizer = wx.BoxSizer(wx.VERTICAL)
 
         ###
         # Add Channels
 
+        self.channelStripPanelManagersById: Dict[Any, ChannelStripPanelManager] = {}
+
+        self.resetConfig(channelConfigs)
+
+        self.panel.SetSizer(self.sizer)
+
+    def resetConfig(self, channelConfigs: List[ChannelConfig]):
+        """
+        Called on init or whenever the Scanner Config changes.
+        """
+        # For now do a complete rebuild
+        for cspm in self.channelStripPanelManagersById.values():
+            cspm.getPanel().Destroy()
         self.channelStripPanelManagersById = {}
 
         for cc in channelConfigs:
-            cspm = ChannelStripPanelManager(self.panel, cc)
+            cspm = ChannelStripPanelManager(self.panel, cc, self._channelSelectCb)
             self.channelStripPanelManagersById[cc.id] = cspm
-            sizer.Add(cspm.getPanel(), 0, 0, 0)
+            self.sizer.Add(cspm.getPanel(), 0, 0, 0)
 
-        self.panel.SetSizer(sizer)
+        self.panel.Layout()
 
     def setChannelRSSI(self, channelId, rssi: float, noiseFloor: Optional[float]):
         cspm = self.channelStripPanelManagersById.get(channelId)
@@ -333,9 +381,192 @@ class ActiveChannelPanelManager(BasePanelManager):
             return
         cspm.setChannelStatus(status)
 
+    def channelConfigUpdated(self, channelId):
+        cspm = self.channelStripPanelManagersById.get(channelId)
+        if not cspm:
+            print("*** CHANNEL NOT FOUND - ActiveChannelPanelManager")
+            return
+        cspm.channelConfigUpdated()
+
     def runMaintenance(self):
         for cspm in self.channelStripPanelManagersById.values():
             cspm.runMaintenance()
+
+
+class ChannelConfigPanelManager(BasePanelManager):
+
+    LABEL_WIDTH = 250
+    FREQ_WIDTH = 120
+
+    CMD_BUTTON_WIDTH = 30
+    CMD_BUTTON_HEIGHT = 25
+
+    def __init__(self, parentPanel, scanner: Scanner):
+        self.parentPanel = parentPanel
+        self.panel = wx.Panel(parentPanel)
+
+        sizer = wx.BoxSizer(wx.HORIZONTAL)
+
+        self.channelConfig: Optional[ChannelConfig] = None
+        self._scanner = scanner
+
+        ###
+        # Label
+        labelSizer = wx.BoxSizer(wx.VERTICAL)
+
+        self.stLabel = wx.StaticText(
+            self.panel,
+            label="",
+            size=(self.LABEL_WIDTH, -1)
+        )
+        font = self.stLabel.GetFont()
+        font.PointSize += 4
+        font = font.Bold()
+        self.stLabel.SetFont(font)
+        labelSizer.Add(self.stLabel, 0, wx.ALL, 2)
+
+        # Freq
+        self.stFreq = wx.StaticText(
+            self.panel,
+            label="",
+            size=(self.FREQ_WIDTH, -1)
+        )
+        labelSizer.Add(self.stFreq, 0, wx.BOTTOM, 2)
+
+        sizer.Add(labelSizer, 0, 0, 0)
+
+        ###
+        # Command Buttons
+
+        self.btnHold = wx.ToggleButton(
+            self.panel, label="H",
+            size=(self.CMD_BUTTON_WIDTH,self.CMD_BUTTON_HEIGHT),
+        )
+        self.btnHold.SetToolTip("Hold")
+        self.btnHold.Bind(wx.EVT_TOGGLEBUTTON, self.onBtnHold)
+        sizer.Add(self.btnHold, 0, wx.ALL, 2)
+
+        self.btnSolo = wx.ToggleButton(
+            self.panel, label="S",
+            size=(self.CMD_BUTTON_WIDTH,self.CMD_BUTTON_HEIGHT),
+        )
+        self.btnSolo.SetToolTip("Solo")
+        self.btnSolo.Bind(wx.EVT_TOGGLEBUTTON, self.onBtnSolo)
+        sizer.Add(self.btnSolo, 0, wx.ALL, 2)
+
+        self.btnMute = wx.ToggleButton(
+            self.panel, label="M",
+            size=(self.CMD_BUTTON_WIDTH,self.CMD_BUTTON_HEIGHT),
+        )
+        self.btnMute.SetToolTip("Mute")
+        self.btnMute.Bind(wx.EVT_TOGGLEBUTTON, self.onBtnMute)
+        sizer.Add(self.btnMute, 0, wx.ALL, 2)
+
+        self.btnDisable = wx.ToggleButton(
+            self.panel,
+            label="D",
+            size=(self.CMD_BUTTON_WIDTH, self.CMD_BUTTON_HEIGHT),
+        )
+        self.btnDisable.SetToolTip("Disable")
+        self.btnDisable.Bind(wx.EVT_TOGGLEBUTTON, self.onBtnDisable)
+        sizer.Add(self.btnDisable, 0, wx.ALL, 2)
+
+        self.btnDisable_1hr = wx.Button(
+            self.panel,
+            label="Disable 1 Hr",
+            size=(-1, self.CMD_BUTTON_HEIGHT),
+        )
+        self.btnDisable_1hr.Bind(wx.EVT_BUTTON, self.onBtnDisable1Hr)
+        sizer.Add(self.btnDisable_1hr, 0, wx.ALL, 2)
+
+        self.btnPlay = wx.Button(
+            self.panel,
+            label="",
+            size=(self.CMD_BUTTON_WIDTH, self.CMD_BUTTON_HEIGHT),
+        )
+        playImage = wx.Image(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'img/play.png'), wx.BITMAP_TYPE_ANY)
+        playBitmap = wx.Bitmap( playImage.Scale(self.CMD_BUTTON_HEIGHT // 2, self.CMD_BUTTON_HEIGHT // 2, wx.IMAGE_QUALITY_HIGH) ) 
+        self.btnPlay.SetBitmap(playBitmap)
+        self.btnPlay.SetToolTip("Force Active")
+        self.btnPlay.Bind(wx.EVT_BUTTON, self.onBtnPlay)
+        sizer.Add(self.btnPlay, 0, wx.ALL, 2)
+
+        self.btnPause = wx.Button(
+            self.panel,
+            label="",
+            size=(self.CMD_BUTTON_WIDTH, self.CMD_BUTTON_HEIGHT),
+        )
+        pauseImage = wx.Image(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'img/pause.png'), wx.BITMAP_TYPE_ANY)
+        pauseBitmap = wx.Bitmap( pauseImage.Scale(self.CMD_BUTTON_HEIGHT // 2, self.CMD_BUTTON_HEIGHT // 2, wx.IMAGE_QUALITY_HIGH) ) 
+        self.btnPause.SetBitmap(pauseBitmap)
+        self.btnPause.SetToolTip("Reset Squelch")
+        self.btnPause.Bind(wx.EVT_BUTTON, self.onBtnPause)
+        sizer.Add(self.btnPause, 0, wx.ALL, 2)
+
+        self._defaultBtnBackgroundColor = self.btnDisable.GetBackgroundColour()
+
+        self.panel.SetSizer(sizer)
+
+    def resetConfig(self):
+        if self.channelConfig is not None:
+            cId = self.channelConfig.id
+            cc = self._scanner.getChannelById(cId)
+            if cc is not None:
+                self.setChannel(cc)
+            else:
+                self.setChannel(self._scanner.channelConfigs[0])
+
+    def channelConfigUpdated(self, channelId):
+        if channelId == self.channelConfig.id:
+            self.resetConfig()
+
+    def setChannel(self, channelConfig: ChannelConfig):
+        self.channelConfig = channelConfig
+        self.stLabel.SetLabel(channelConfig.label)
+        self.stFreq.SetLabel(f"{channelConfig.freq_hz / 1e6:6.3f}")
+
+        self.btnHold.SetValue(channelConfig.hold)
+        self.btnHold.SetBackgroundColour(wx.Colour('yellow') if channelConfig.hold else self._defaultBtnBackgroundColor)
+
+        self.btnSolo.SetValue(bool(channelConfig.solo))
+        self.btnSolo.SetBackgroundColour(wx.Colour('yellow') if channelConfig.solo else self._defaultBtnBackgroundColor)
+
+        self.btnMute.SetValue(channelConfig.mute)
+        self.btnMute.SetBackgroundColour(wx.Colour('red') if channelConfig.mute else self._defaultBtnBackgroundColor)
+        
+        disabled = not channelConfig.isEnabled()
+        self.btnDisable.SetValue(disabled)
+        self.btnDisable.SetBackgroundColour(wx.Colour('red') if disabled else self._defaultBtnBackgroundColor)
+
+        forceActive = channelConfig.forceActive
+        self.btnPlay.SetBackgroundColour(wx.Colour('red') if forceActive else self._defaultBtnBackgroundColor)
+
+        self.panel.Refresh()
+
+    def onBtnHold(self, event):
+        hold = self.btnHold.GetValue()
+        self._scanner.holdChannel(self.channelConfig.id, hold)
+
+    def onBtnSolo(self, event):
+        solo = self.btnSolo.GetValue()
+        self._scanner.soloChannel(self.channelConfig.id, solo)
+
+    def onBtnMute(self, event):
+        mute = self.btnMute.GetValue()
+        self._scanner.muteChannel(self.channelConfig.id, mute)
+
+    def onBtnDisable(self, event):
+        enabled = not self.btnDisable.GetValue()
+        self._scanner.enableChannel(self.channelConfig.id, enabled)
+
+    def onBtnDisable1Hr(self, event):
+        self._scanner.disableChannelUntil(self.channelConfig.id, time.time() + 3600.0)
+
+    def onBtnPlay(self, event):
+        self._scanner.channelForceActive(self.channelConfig.id, not self.channelConfig.forceActive)
+
+    def onBtnPause(self, event):
+        self._scanner.channelForceActive(self.channelConfig.id, False)
 
 
 class MainFrame(wx.Frame):
@@ -367,7 +598,6 @@ class MainFrame(wx.Frame):
 
         fileMenu = wx.Menu()
         # The "\t..." syntax defines an accelerator key that also triggers the same event
-        #fileMenu.AppendSeparator()
         # When using a stock ID we don't need to specify the menu item's label
         exitItem = fileMenu.Append(wx.ID_EXIT)
 
@@ -385,16 +615,20 @@ class MainFrame(wx.Frame):
         self.Bind(wx.EVT_MENU, self.onShowConfigFrame, showConfigItem)
         self.Bind(wx.EVT_MENU, self.OnExit,  exitItem)
 
-
         ###
         # Active Channel Manager
 
-        self.activeChannelPanelManager = ActiveChannelPanelManager(self.panel, self._scanner.channelConfigs)
+        self.activeChannelPanelManager = ActiveChannelPanelManager(self.panel, self._scanner.channelConfigs, self.channelSelect)
+        self.sizer.Add(self.activeChannelPanelManager.getPanel(), 1, wx.TOP|wx.LEFT, 5)
 
-        self.sizer.Add(self.activeChannelPanelManager.getPanel(), 0, wx.TOP|wx.LEFT, 5)
+        ###
+        # ChannelConfigPanelManager
+
+        self.channelConfigPanelManager = ChannelConfigPanelManager(self.panel, self._scanner)
+        self.sizer.Add(self.channelConfigPanelManager.getPanel(), 0, wx.ALL, 2)
+        self.channelConfigPanelManager.setChannel(self._scanner.channelConfigs[0])
 
         self.panel.SetSizer(self.sizer)
-
 
         ###
         # Misc Events
@@ -409,9 +643,7 @@ class MainFrame(wx.Frame):
 
         self._scannerControlThread = ScannerControlThread(
             self._scanner,
-            self.channelStatusCb,
-            self.scanWindowStartCb,
-            self.scanWindowDoneCb
+            self.processScannerData,
         )
         self._scannerControlThread.start()
 
@@ -422,17 +654,49 @@ class MainFrame(wx.Frame):
         self.Bind(wx.EVT_TIMER, self.onMaintenanceTimer, self.maintenanceTimer)
         self.maintenanceTimer.Start(2000) # 2 seconds
 
-
     def onMaintenanceTimer(self, event):
         self.activeChannelPanelManager.runMaintenance()
 
-    def scanWindowStartCb(self, scanWindowId, rxId):
-        pass
+    def resetConfig(self):
+        self.activeChannelPanelManager.resetConfig(self._scanner.channelConfigs)
+        
+        self.channelConfigPanelManager.resetConfig()
 
-    def scanWindowDoneCb(self, scanWindowId):
-        pass
+        if self.configDisplayFrame:
+            self.configDisplayFrame.resetConfig()
+        self.Layout()
 
-    def channelStatusCb(self, data):
+    def processScannerData(self):
+        try:
+            while True:
+                data = scannerToUiQueue.get(False)
+                if data['type'] == "ChannelStatus":
+                    self.setChannelStatus(data["data"])
+                elif data['type'] == "ScanWindowConfigsChanged":
+                    self.resetConfig()
+                elif data['type'] == "ChannelConfig":
+                    self.channelConfigUpdated(data['data']['id'])
+
+                scannerToUiQueue.task_done()
+        except queue.Empty:
+            pass
+
+    def channelConfigUpdated(self, channelId):
+        """
+        Notification to UI elements that the indicated channel's config has updated
+        """
+
+        # Update Active Channel PanelMan
+        self.activeChannelPanelManager.channelConfigUpdated(channelId)
+
+        # Update Config PanelMan
+        self.channelConfigPanelManager.channelConfigUpdated(channelId)
+
+        # Update Config Display Frame
+        if self.configDisplayFrame:
+            self.configDisplayFrame.channelConfigUpdated(channelId)
+
+    def setChannelStatus(self, data):
         print(data)
 
         volume_dBFS = data.get('volume')
@@ -443,18 +707,19 @@ class MainFrame(wx.Frame):
         if rssi is not None:
             self.activeChannelPanelManager.setChannelRSSI(data['id'], rssi, noiseFloor)
 
-        if data['status'] == ChannelStatus.ACTIVE:
-            channel = self._scanner.getChannelById(data['id'])
-            if channel:
-                print(f"\n {datetime.datetime.now().time().isoformat()[0:8]}  {channel.label} ({channel.freq_hz/1e6})")
         self.activeChannelPanelManager.setChannelStatus(data['id'], data['status'])
         
         # Update ConfigDisplay Frame
         if self.configDisplayFrame:
             self.configDisplayFrame.SetChannelStatus(data['id'], data['status'])
 
+    def channelSelect(self, channelId):
+        cc = self._scanner.getChannelById(channelId)
+        if cc:
+            self.channelConfigPanelManager.setChannel(cc)
+
     def onShowConfigFrame(self, event):
-        self.configDisplayFrame = ConfigDisplayFrame(self._scanner, None, title="Scanner Config", size=(600,400))
+        self.configDisplayFrame = ConfigDisplayFrame(self._scanner, self.channelSelect, None, title="Scanner Config", size=(600,400))
         self.configDisplayFrame.Show()
         self.configDisplayFrame.Raise()
         self.configDisplayFrame.SetFocus()
