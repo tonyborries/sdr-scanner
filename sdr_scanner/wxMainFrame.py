@@ -51,9 +51,9 @@ class ScannerControlThread(StoppableThread):
 
     def run(self) -> None:
         self.scanner.runReceiverProcesses()
+        super().stop()
 
     def stop(self) -> None:
-        super().stop()
         self.scanner.stop()
 
     def processScannerDataCb(self) -> None:
@@ -732,7 +732,6 @@ class MainFrame(wx.Frame):
         if self.configDisplayFrame:
             self.configDisplayFrame.Close(True)
         self._scannerControlThread.stop()
-        self._scannerControlThread.join()
 
         event.Skip()
 

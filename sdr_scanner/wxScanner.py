@@ -1,3 +1,4 @@
+import signal
 import wx
 
 from .wxMainFrame import MainFrame
@@ -11,6 +12,13 @@ def run(scanner: Scanner):
 
     mainFrame = MainFrame(scanner, None, title="wxSDRScanner", size=(600,400))
     mainFrame.Show()
+
+    def signal_handler(sig, frame):
+        print('SIGINT - Running cleanup...')
+        mainFrame.Close()
+
+    # Set the signal handler for SIGINT (Ctrl+C)
+    signal.signal(signal.SIGINT, signal_handler)
 
     wxApp.MainLoop()
 

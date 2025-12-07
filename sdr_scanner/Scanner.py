@@ -2,9 +2,10 @@ from multiprocessing import Pipe, Process
 import queue
 import sys
 import time
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 import yaml
 
+from .AudioServer import AudioServerConfig, AudioSender
 from .Channel import ChannelConfig
 from .Receiver import ReceiverConfig, runAsProcess
 from .ScanWindow import ScanWindowConfig
@@ -34,6 +35,8 @@ class Scanner():
         self._outputQueues: List[queue.Queue] = []
         self._processQueueCallbacks = []
 
+        self.audioOutputConfigDicts: List[Dict[str, Any]] = []
+
         self.maxChannelsPerWindow = 16
 
         self._stopFlag = False
@@ -53,6 +56,11 @@ class Scanner():
             scannerDict = configDict.get('scanner', {})
             if 'maxChannelsPerWindow' in scannerDict:
                 scanner.maxChannelsPerWindow = scannerDict['maxChannelsPerWindow']
+
+            ###
+            # Audio Outputs
+            if 'outputs' in configDict:
+                scanner.audioOutputConfigDicts = configDict['outputs']
 
             ###
             # Receiver
@@ -309,6 +317,14 @@ class Scanner():
 
     def runReceiverProcesses(self):
 
+        ###
+        # Launch Audio Server
+
+        self.audioServerConfig = AudioServerConfig(numInputStreams=len(self.receiverConfigs), outputConfigDicts=self.audioOutputConfigDicts)
+        audioServerProcess = self.audioServerConfig.getProcess()
+        audioServerProcess.daemon = True
+        audioServerProcess.start()
+
         while True:
 
             self._runReceivers()
@@ -317,21 +333,29 @@ class Scanner():
                 self._configDirty = False
                 self.buildWindows()
 
+            if self._stopFlag:
+                audioServerProcess.kill()
+                self.audioServerConfig.cleanup()
+                return
+
     def _runReceivers(self):
 
         self._receiverProcesses = []
 
+
         ###
         # Init Receiver Processes
 
+        i = 0
         for rxConfig in self.receiverConfigs:
 
             receiverPipe, remotePipe = Pipe()
 
-            p = Process(target=runAsProcess, args=(remotePipe, rxConfig ))
+            p = Process(target=runAsProcess, args=(remotePipe, rxConfig, *self.audioServerConfig.getInputShmBuffers(i) ))
             self._receiverProcesses.append( (rxConfig, receiverPipe, p) )
             p.start()
             self._receiverCurrentScanWindow[rxConfig.id] = None
+            i += 1
 
         ###
         # Sync Config
@@ -395,12 +419,12 @@ class Scanner():
 
             if self._stopFlag or self._configDirty:
                 for rxConfig, pipe, process in self._receiverProcesses:
-                    pipe.send([{'type': 'kill'}])
-                    print("sent kill")
+                    # pipe.send([{'type': 'kill'}])
+                    # print("sent kill")
+                    process.kill()
                     process.join()
-                    print("post join")
-                if self._stopFlag:
-                    sys.exit(0)
+                # if self._stopFlag:
+                #     sys.exit(0)
                 return
 
 

@@ -4,6 +4,7 @@ os.environ['SOAPY_SDR_LOG_LEVEL'] = 'WARNING'
 
 import contextlib
 from enum import IntEnum
+from multiprocessing import shared_memory
 import time
 from typing import Any, Dict, List, Optional
 import uuid
@@ -13,6 +14,7 @@ from gnuradio import gr
 from gnuradio import soapy
 
 from .const import AUDIO_SAMPLERATE
+from .AudioServer import AudioSender, AudioSender_grEmbeddedPythonBlock
 from .Channel import Channel
 from .ScanWindow import ScanWindow, ScanWindowConfig
 
@@ -31,7 +33,7 @@ class ReceiverStatus(IntEnum):
 
 class ReceiverBlock(gr.top_block):
 
-    def __init__(self, deviceArg=''):
+    def __init__(self, deviceArg):
         gr.top_block.__init__(self, "RTL-SDR Rx", catch_exceptions=True)
 
         self.deviceArg = deviceArg
@@ -85,7 +87,7 @@ class Receiver_RTLSDR(ReceiverBlock):
     ]
 
     def __init__(self, deviceArg=''):
-        super().__init__(deviceArg='')
+        super().__init__(deviceArg)
 
         self.soapy_rtlsdr_source_0 = None
         dev = 'driver=rtlsdr'
@@ -179,17 +181,20 @@ class ReceiverConfig():
         return Receiver_RTLSDR.SAMPLE_RATES
 
 
-def runAsProcess(pipe, receiverConfig: ReceiverConfig):
+def runAsProcess(pipe, receiverConfig: ReceiverConfig, audioShmBuffer: shared_memory.SharedMemory, headIdx: Any, tailIdx: Any):
 
 #    with contextlib.redirect_stderr(None):
 #        with contextlib.redirect_stdout(None):
-            _runAsProcess(pipe, receiverConfig)
+            _runAsProcess(pipe, receiverConfig, audioShmBuffer, headIdx, tailIdx)
 
-def _runAsProcess(pipe, receiverConfig: ReceiverConfig):
+def _runAsProcess(pipe, receiverConfig: ReceiverConfig, audioShmBuffer: shared_memory.SharedMemory, headIdx: Any, tailIdx: Any):
 
     rx = Receiver(receiverConfig.id, receiverConfig.rxType, receiverConfig.receiverArgs)
     rxBlock = rx.getReceiverBlock()
-    audio_sink_0 = audio.sink(AUDIO_SAMPLERATE, '', True)
+
+    # blockAudioSink = audio.sink(AUDIO_SAMPLERATE, '', True)
+    audioSender = AudioSender(audioShmBuffer, headIdx, tailIdx)
+    blockAudioSink = AudioSender_grEmbeddedPythonBlock(audioSender)
 
     runningWindow = None
     while True:
@@ -203,7 +208,7 @@ def _runAsProcess(pipe, receiverConfig: ReceiverConfig):
                 if item['type'] == 'config':
                     if rxBlock.status == ReceiverStatus.RUNNING_WINDOW:
                         rxBlock.stopWindow()
-                        rxBlock.teardownWindow(runningWindow, audio_sink_0)
+                        rxBlock.teardownWindow(runningWindow, blockAudioSink)
                     rx.applyConfigDict(item['data'])
                 elif item['type'] == 'kill':
                     if rxBlock.status == ReceiverStatus.RUNNING_WINDOW:
@@ -216,7 +221,7 @@ def _runAsProcess(pipe, receiverConfig: ReceiverConfig):
                     if rxBlock.status != ReceiverStatus.IDLE:
                         raise Exception(f"Received new Scan Window {windowId} while not IDLE")
                     #print(f"Scanning window {windowId} on {str(rxBlock)}")
-                    rxBlock.setupWindow(scanWindow, audio_sink_0)
+                    rxBlock.setupWindow(scanWindow, blockAudioSink)
                     rxBlock.startWindow()
                 elif item['type'] == "ChannelMute":
                     ccId = item['data']['id']
@@ -259,7 +264,7 @@ def _runAsProcess(pipe, receiverConfig: ReceiverConfig):
             if runningWindow is not None:
                 pipe.send([{'type': 'window_done', 'data': runningWindow.id}])
                 runningWindow = None
-            rxBlock.teardownWindow(scanWindow, audio_sink_0)
+            rxBlock.teardownWindow(scanWindow, blockAudioSink)
             rxBlock.status = ReceiverStatus.IDLE
 
         time.sleep(0.001)

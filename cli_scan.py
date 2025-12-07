@@ -3,6 +3,7 @@ import datetime
 import queue
 import signal
 import sys
+import time
 
 from sdr_scanner.Scanner import Scanner
 
@@ -66,7 +67,6 @@ def main():
     
     def sig_handler(sig=None, frame=None):
         scanner.stop()
-        sys.exit(0)
         
     signal.signal(signal.SIGINT, sig_handler)
     signal.signal(signal.SIGTERM, sig_handler)
