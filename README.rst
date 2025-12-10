@@ -131,6 +131,15 @@ Example to listen in Bash::
 
     nc -l -u 12345 | sox -t raw -r 16k -e floating-point -b 32 -c 1 - -t alsa
 
+Icecast
+^^^^^^^
+
+Sends MP3 audio to an Icecast server::
+
+    - type: icecast
+      url: http://127.0.0.1:8000/scanner
+      password: hackme
+
 
 
 Installation
@@ -143,6 +152,9 @@ Install 'gnuradio' and optionally 'wxPython' to enable using the GUI mode.
     # Apt Based Systems
     apt-get install gnuradio python3-wxgtk4.0
 
+For Icecast outputs, the 'lameenc' python package must be available:: 
+
+    pip3 install lameenc
 
 
 Running

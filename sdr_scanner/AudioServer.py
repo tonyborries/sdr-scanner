@@ -5,6 +5,7 @@ import os
 import pyaudio
 import socket
 import struct
+import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -12,6 +13,15 @@ from gnuradio import gr
 
 from .const import AUDIO_SAMPLERATE
 from .hpSharedMem import HighPerformanceCircularBuffer
+
+
+ICECAST_SUPPORT = True
+try:
+    import lameenc
+    import requests
+except ImportError:
+    ICECAST_SUPPORT = False
+    print("Warning: Missing Packages, Icecast support not available.")
 
 
 class AudioServerConfig(object):
@@ -71,8 +81,10 @@ class AudioServerConfig(object):
     def getOutputFromConfig(cls, configDict):
         if configDict['type'].lower() == 'local':
             return AudioServerOutput_Local()
-        if configDict['type'].lower() == 'udp':
+        elif configDict['type'].lower() == 'udp':
             return AudioServerOutput_UDP(configDict['serverIp'], configDict['serverPort'])
+        elif configDict['type'].lower() == 'icecast':
+            return AudioServerOutput_Icecast(configDict['url'], configDict['password'])
         raise Exception(f"Unknown Audio Output Type: {configDict}")
 
 
@@ -390,4 +402,101 @@ class AudioServerOutput_UDP(AudioServerOutput_Base):
                 print("Failed Sending to UDP - reconnect")
                 print(e)
                 self.reconnect()
+
+
+class AudioServerOutput_Icecast(AudioServerOutput_Base):
+    """
+    Stream MP3 Audio to an Icecast server
+    """
+    SAMPLES_PER_FRAME = AUDIO_SAMPLERATE // 4
+    BUFFER_LEN = SAMPLES_PER_FRAME * 3
+
+    def __init__(self, url, password):
+        self._outputBuffer = collections.deque(maxlen=self.BUFFER_LEN)
+
+        self._url = url
+        self._password = password
+        self._mp3Bitrate = 48000
+
+        self._mp3Encoder = None
+
+        self._session = None
+        self._stopEvent = None
+        self._streamingThread = None
+
+    def reconnect(self):
+        """
+        Initial connect or reconnect
+        """
+        self.close()
+
+        # MP3 encoder
+        self._mp3Encoder = lameenc.Encoder()
+        self._mp3Encoder.set_bit_rate(self._mp3Bitrate)
+        self._mp3Encoder.set_in_sample_rate(AUDIO_SAMPLERATE)
+        self._mp3Encoder.set_channels(1)
+        self._mp3Encoder.set_quality(2)
+
+        # Requests Session
+        self._session = requests.Session()
+
+        # Launch Streaming thread
+        self._stopEvent = threading.Event()
+        self._streamingThread = threading.Thread(target=self._runIcecastStream, daemon=True, args=(self._stopEvent, ))
+        self._streamingThread.start()
+
+    def close(self):
+        if self._stopEvent is not None:
+            self._stopEvent.set()
+            self._stopEvent = None
+
+        if self._mp3Encoder is not None:
+            self._mp3Encoder = None
+
+        if self._streamingThread is not None:
+            self._streamingThread.join()
+            self._streamingThread = None
+
+    def _streamDataGen(self, stopEvt):
+        while not stopEvt.is_set():
+            if len(self._outputBuffer) >= self.SAMPLES_PER_FRAME:
+                samps = np.ndarray([self.SAMPLES_PER_FRAME],  dtype=np.int16)
+                for i in range(0, self.SAMPLES_PER_FRAME):
+                    samp = self._outputBuffer.popleft()
+                    samps[i] = int(samp * 32767.0)
+
+                mp3out = self._mp3Encoder.encode(samps.tobytes())
+                if mp3out:
+                    yield mp3out
+            else:
+                time.sleep(0.1)
+
+    def _runIcecastStream(self, stopEvt):
+        while not stopEvt.is_set():
+            try:
+                print(f"Connecting to Icecast Stream: {self._url}")
+
+                # Dump outputBuffer 
+                self._outputBuffer.clear()
+
+                resp = self._session.put(
+                    self._url,
+                    data=self._streamDataGen(stopEvt),
+                    auth=("source", self._password),
+                    headers={"Content-Type": "audio/mpeg"},
+                    stream=True,
+                    timeout=10,
+                )
+            except Exception as e:
+                print(f"Error streaming to Icecast: {e}")
+
+            timeoutTime = time.time() + 30
+            while time.time() < timeoutTime:
+                if stopEvt.is_set():
+                    return
+                time.sleep(0.001)
+        print("Exiting Icecast Thread")
+
+    def send(self, samples: List[float]):
+        self._outputBuffer.extend(samples)
 
