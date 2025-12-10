@@ -697,8 +697,6 @@ class MainFrame(wx.Frame):
             self.configDisplayFrame.channelConfigUpdated(channelId)
 
     def setChannelStatus(self, data):
-        print(data)
-
         volume_dBFS = data.get('volume')
         self.activeChannelPanelManager.setChannelVolume(data['id'], volume_dBFS)
 

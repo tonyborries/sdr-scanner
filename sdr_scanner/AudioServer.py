@@ -4,7 +4,6 @@ import numpy as np
 import os
 import pyaudio
 import socket
-import struct
 import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
@@ -130,7 +129,9 @@ class AudioSender_grEmbeddedPythonBlock(gr.sync_block):
 
 class AudioServer(object):
     """
-    Stand-alone process, receives audio streams from Receivers, mixes them down, 
+    Stand-alone process, receives audio streams from Receivers, mixes them down.
+
+    input samples are floats, we convert to short for outputs
     """
     BUFFER_LEN = 10000
     BUFFER_TARGET_LEN = 4000  # if the buffers are larger than this, we start discarding samples to avoid building up latency
@@ -204,7 +205,7 @@ class AudioServer(object):
             # Mix Audio
             curTime = time.time()
             samplesToMix = int((curTime - startTime) * AUDIO_SAMPLERATE) - samplesMixed
-            newSamples = []
+            newSamples: List[int] = []
             for _ in range(0, samplesToMix):
                 outSum = 0.0
                 for i in range(0, self._numInputStreams):
@@ -212,7 +213,15 @@ class AudioServer(object):
                     lenBuf = len(buf)
                     if lenBuf > 0:
                         outSum += buf.popleft()
-                newSamples.append(outSum)
+
+                # convert to short
+                i_out = int(outSum * 32767.0)
+                if i_out > 32767:
+                    i_out = 32767
+                elif i_out < -32767:
+                    i_out = -32767
+
+                newSamples.append(i_out)
             samplesMixed += samplesToMix
 
             for i in range(0, self._numInputStreams):
@@ -222,6 +231,7 @@ class AudioServer(object):
                     print(f"AudioServer - mixBuf - Discarding {lenBuf - self.BUFFER_TARGET_LEN} samples")
                     for _ in range(0, lenBuf - self.BUFFER_TARGET_LEN):
                         buf.popleft()
+
 
             # Send to outputs
             for o in self._outputs:
@@ -256,7 +266,7 @@ class AudioServerOutput_Base(object):
     def close(self):
         raise NotImplementedError()
     
-    def send(self, samples: List[float]):
+    def send(self, samples: List[int]):
         raise NotImplementedError()
 
 
@@ -284,7 +294,7 @@ class AudioServerOutput_Local(AudioServerOutput_Base):
 
         # Open stream using callback (3)
         self._pyaudioStream = self._pyaudio.open(
-            format=pyaudio.paFloat32,
+            format=pyaudio.paInt16,
             channels=1,
             rate=AUDIO_SAMPLERATE,
             output=True,
@@ -319,13 +329,12 @@ class AudioServerOutput_Local(AudioServerOutput_Base):
 
         # status flags - paInputUnderflow, paInputOverflow, paOutputUnderflow, paOutputOverflow, paPrimingOutput
 
-        byteArray = bytearray()
+        outdata = np.zeros([frame_count],  dtype=np.int16)
         try:
             for i in range(0, frame_count):
-                samp = self._outputBuffer.popleft()
-                byteArray.extend(struct.pack('<f', samp))
+                outdata[i] = self._outputBuffer.popleft()
         except IndexError:
-            byteArray.extend( bytearray((frame_count - i) * 4) )
+            pass
 
         outputBufferLen = len(self._outputBuffer)
         if outputBufferLen > self.FRAMES_PER_BUFFER:
@@ -336,9 +345,9 @@ class AudioServerOutput_Local(AudioServerOutput_Base):
             else:
                 self._outputBuffer.popleft()
 
-        return (bytes(byteArray), pyaudio.paContinue)
+        return (outdata.tobytes(), pyaudio.paContinue)
 
-    def send(self, samples: List[float]):
+    def send(self, samples: List[int]):
         self._outputBuffer.extend(samples)
 
         if self._pyaudioStream is None or not self._pyaudioStream.is_active():
@@ -350,9 +359,9 @@ class AudioServerOutput_UDP(AudioServerOutput_Base):
     """
     Send raw audio to a UDP port.
 
-    Currently only supports float samples
+    Currently only supports short int samples
 
-        nc -l -u 12345 | sox -t raw -r 16k -e floating-point -b 32 -c 1 - -t alsa
+        nc -l -u 12345 | sox -t raw -r 16k -e signed-integer -b 16 -c 1 - -t alsa
     """
     SAMPLES_PER_PACKET = 100
     BUFFER_LEN = 10000
@@ -384,20 +393,19 @@ class AudioServerOutput_UDP(AudioServerOutput_Base):
                 print(e)
             self._socket = None
 
-    def send(self, samples: List[float]):
+    def send(self, samples: List[int]):
         self._outputBuffer.extend(samples)
         while len(self._outputBuffer) > self.SAMPLES_PER_PACKET:
-            byteArray = bytearray()
-            for _ in range(0, self.SAMPLES_PER_PACKET):
-                samp = self._outputBuffer.popleft()
-                byteArray.extend(struct.pack('<f', samp))
+            outdata = np.ndarray([self.SAMPLES_PER_PACKET],  dtype=np.int16)
+
+            for i in range(0, self.SAMPLES_PER_PACKET):
+                outdata[i] = self._outputBuffer.popleft()
 
             try:
                 if self._socket is None:
                     self.reconnect()
-                    self._outputBuffer.clear()
                     return
-                self._socket.sendto(byteArray, (self._serverIp, self._serverPort))
+                self._socket.sendto(outdata.tobytes(), (self._serverIp, self._serverPort))
             except Exception as e:
                 print("Failed Sending to UDP - reconnect")
                 print(e)
@@ -462,8 +470,7 @@ class AudioServerOutput_Icecast(AudioServerOutput_Base):
             if len(self._outputBuffer) >= self.SAMPLES_PER_FRAME:
                 samps = np.ndarray([self.SAMPLES_PER_FRAME],  dtype=np.int16)
                 for i in range(0, self.SAMPLES_PER_FRAME):
-                    samp = self._outputBuffer.popleft()
-                    samps[i] = int(samp * 32767.0)
+                    samps[i] = self._outputBuffer.popleft()
 
                 mp3out = self._mp3Encoder.encode(samps.tobytes())
                 if mp3out:
@@ -497,6 +504,6 @@ class AudioServerOutput_Icecast(AudioServerOutput_Base):
                 time.sleep(0.001)
         print("Exiting Icecast Thread")
 
-    def send(self, samples: List[float]):
+    def send(self, samples: List[int]):
         self._outputBuffer.extend(samples)
 

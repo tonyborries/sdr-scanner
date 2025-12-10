@@ -125,11 +125,11 @@ Plays audio using the default device with pyAudio / PortAudio
 UDP
 ^^^
 
-Sends raw audio to a UDP port. Sends a single channel, 32-bit float at 16KHz.
+Sends raw audio to a UDP port. Sends a single channel, 16-bit short int at 16KHz.
 
 Example to listen in Bash::
 
-    nc -l -u 12345 | sox -t raw -r 16k -e floating-point -b 32 -c 1 - -t alsa
+    nc -l -u 12345 | sox -t raw -r 16k -e signed-integer -b 16 -c 1 - -t alsa
 
 Icecast
 ^^^^^^^
