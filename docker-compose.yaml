@@ -1,0 +1,11 @@
+services:
+  sdr_scanner:
+    build: .
+    ports:
+      - "8123:8123"
+    privileged: true
+    volumes:
+      - .:/app
+      - /dev/usb:/dev/usb
+    restart: no
+    command: python3 cli_scan.py -c sdrscan.yaml

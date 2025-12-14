@@ -1,3 +1,4 @@
+import asyncio
 import collections
 from multiprocessing import shared_memory, Process, Value
 import numpy as np
@@ -6,6 +7,7 @@ import socket
 import threading
 import time
 from typing import Any, Dict, Generator, List, Optional, Tuple
+import websockets
 
 from gnuradio import gr
 
@@ -90,6 +92,8 @@ class AudioServerConfig(object):
             return AudioServerOutput_UDP(configDict['serverIp'], configDict['serverPort'])
         elif configDict['type'].lower() == 'icecast':
             return AudioServerOutput_Icecast(configDict['url'], configDict['password'])
+        elif configDict['type'].lower() == 'websocket':
+            return AudioServerOutput_Websocket(configDict['host'], configDict['port'])
         raise Exception(f"Unknown Audio Output Type: {configDict}")
 
 
@@ -505,5 +509,128 @@ class AudioServerOutput_Icecast(AudioServerOutput_Base):
         print("Exiting Icecast Thread")
 
     def send(self, samples: List[int]) -> None:
+        self._outputBuffer.extend(samples)
+
+
+class AudioServerOutput_Websocket(AudioServerOutput_Base):
+    """
+    Stream raw audio to websockets
+    """
+    SAMPLES_PER_FRAME = AUDIO_SAMPLERATE // 4
+    BUFFER_LEN = SAMPLES_PER_FRAME * 3
+
+    def __init__(self, host: str, port: int) -> None:
+        self._outputBuffer: collections.deque = collections.deque(maxlen=self.BUFFER_LEN)
+
+        self._host = host
+        self._port = port
+
+        self._socketClients = set()
+
+        self._stopEvent: Optional[threading.Event] = None
+        self._serverThread: Optional[threading.Thread] = None
+
+    def reconnect(self) -> None:
+        """
+        Initial connect or reconnect
+        """
+        self.close()
+
+        # Launch Streaming thread
+        self._stopEvent = threading.Event()
+        self._serverThread = threading.Thread(target=self._runServer, daemon=True, args=(self._stopEvent, ))
+        self._serverThread.start()
+
+    def close(self):
+        if self._stopEvent is not None:
+            self._stopEvent.set()
+            self._stopEvent = None
+
+        if self._serverThread is not None:
+            self._serverThread.join()
+            self._serverThread = None
+
+    async def _wsStreamer(self, stopEvt) -> None:
+        """
+        Stream the audio samples
+        """
+        while not stopEvt.is_set():
+            if len(self._outputBuffer) >= self.SAMPLES_PER_FRAME:
+                samps: np.ndarray = np.ndarray([self.SAMPLES_PER_FRAME],  dtype=np.int16)
+                for i in range(0, self.SAMPLES_PER_FRAME):
+                    samps[i] = self._outputBuffer.popleft()
+                dataBytes = samps.tobytes()
+
+                deadClients = []
+                for ws in list(self._socketClients):
+                    try:
+                        await ws.send(dataBytes)
+                    except Exception as e:
+                        print(f"send error: {e}")
+                        deadClients.append(ws)
+
+                for ws in deadClients:
+                    self._socketClients.discard(ws)
+
+            else:
+                await asyncio.sleep(0.1)
+
+    async def _wsHandler(self, websocket) -> None:
+        """
+        New connection handler
+        """
+        print(f"client connected: {getattr(websocket, 'remote_address', None)}")
+        self._socketClients.add(websocket)
+
+        try:
+            async for _ in websocket:
+                pass
+        except Exception as e:
+            print(f"client error: {e}")
+        finally:
+            self._socketClients.discard(websocket)
+            print(" client disconnected")
+
+    async def _wsServe(self, stopEvt):
+        """
+        Start the websocket and configure callbacks
+        """
+        print(f"Starting Websocket Server {self._host}:{self._port}")
+        async with websockets.serve(self._wsHandler, self._host, self._port) as server:
+            await self._wsStreamer(stopEvt)
+
+    def _runServer(self, stopEvt):
+        """
+        async run the websocket
+        """
+
+        while not stopEvt.is_set():
+
+            # Dump outputBuffer 
+            self._outputBuffer.clear()
+
+            try:
+                asyncio.run(self._wsServe(stopEvt))
+                break
+            except OSError as e:
+                print(f"bind failed: {e}")
+                if self._stop:
+                    break
+                print("retrying bind in 1 second...")
+                time.sleep(1)
+            except Exception as e:
+                print("loop error:", e)
+                break
+
+            print("Websocket serve done")
+
+            timeoutTime = time.time() + 30
+            while time.time() < timeoutTime:
+                if stopEvt.is_set():
+                    return
+                time.sleep(0.001)
+        print("Exiting Websocket Thread")
+
+    def send(self, samples: List[int]):
         self._outputBuffer.extend(samples)
 

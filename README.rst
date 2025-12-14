@@ -140,6 +140,21 @@ Sends MP3 audio to an Icecast server::
       url: http://127.0.0.1:8000/scanner
       password: hackme
 
+Websocket
+^^^^^^^^^
+
+Sends 16-bit signed integer at 16KHz.
+
+*NOTE:* Support for this is dependent on the Python / websockets versions installed. Python3.12+ recommended.
+Older versions may fail to accept connections.
+
+::
+
+    - type: websocket
+      host: 0.0.0.0
+      port: 8123
+
+An example HTML file is available in web/ws_audio.html that provides an audio player (adjust the `wsUrl` string in the file to match your IP:Port).
 
 
 Installation
@@ -155,6 +170,24 @@ Install 'gnuradio' and optionally 'wxPython' to enable using the GUI mode.
 For Icecast outputs, the 'lameenc' python package must be available:: 
 
     pip3 install lameenc
+
+Docker
+------
+
+Minimal docker support is included for those who want it, limited to running the CLI app (no GUI support).
+
+Blacklist kernel modules on host and reboot (or rmmod each)::
+
+    $ cat /etc/modprobe.d/blacklist-rtl.conf 
+    blacklist dvb_usb_rtl28xxu
+    blacklist rtl2832
+    blacklist rtl2830
+    blacklist dvb_core
+    blacklist dvb_usb_rtl2832u
+    blacklist dvb_usb_v2
+    blacklist r820t
+    blacklist rtl2832_sdr
+    blacklist rtl2838
 
 
 Running
@@ -203,22 +236,6 @@ changes are not persisted, and will be reset upon Scanner restart. The following
 - **Disable 1 Hr**: Temporarily disables the Channel; it will be automatically re-enabled after 1 Hour.
 - **Play** - Breaks the Squelch and forces the Channel Active. For example, on a NOAA channel, bypass the EAS Alert detection and listen live.
 - **Pause** - Resets the Squelch from a Forced Active, or reset the Alert detection on an EAS Channel.
-
-Docker
-------
-
-Blacklist kernel modules on host and reboot (or rmmod each)::
-
-    $ cat /etc/modprobe.d/blacklist-rtl.conf 
-    blacklist dvb_usb_rtl28xxu
-    blacklist rtl2832
-    blacklist rtl2830
-    blacklist dvb_core
-    blacklist dvb_usb_rtl2832u
-    blacklist dvb_usb_v2
-    blacklist r820t
-    blacklist rtl2832_sdr
-    blacklist rtl2838
 
 
 Channel Modes
@@ -273,7 +290,6 @@ Example Config
 This mode scans a channel looking for the EAS Alert Tone (1050 Hz) on NOAA Weather Stations.
 If detected, the Channel is activated for the duration of the Dwell Time. No SAME decoding
 or End of Message is detected. Scanning resumes at the end of the Dwell Time.
-
 
 Broadcast FM EAS
 ----------------

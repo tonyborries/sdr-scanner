@@ -2,3 +2,4 @@ lameenc
 numpy
 requests
 pyYaml
+websockets

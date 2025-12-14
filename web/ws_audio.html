@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>SDR-Scanner WebSocket Audio</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background: #111;
+            color: #eee;
+            padding: 20px;
+        }
+        h2 { color: #4fc3f7; }
+        .card {
+            background: #1c1c1c;
+            padding: 15px 20px;
+            border-radius: 8px;
+            max-width: 480px;
+        }
+        .field {
+            margin-top: 8px;
+        }
+        label {
+            display: inline-block;
+            width: 110px;
+        }
+        #vu {
+            width: 100%;
+            height: 16px;
+            background: #333;
+            border-radius: 3px;
+            overflow: hidden;
+            margin-top: 4px;
+        }
+        #vu-fill {
+            height: 100%;
+            width: 0%;
+            background: #4caf50;
+            transition: width 40ms linear;
+        }
+        #startBtn {
+            margin-bottom: 10px;
+            padding: 8px 14px;
+        }
+        #status {
+            margin-top: 10px;
+            font-size: 0.9em;
+            color: #aaa;
+        }
+    </style>
+</head>
+<body>
+    <h2>SDR-Scanner Audio</h2>
+
+    <div class="card">
+        <button id="startBtn">Start Audio</button>
+        <p id="status">Disconnected</p>
+
+        <div class="field">
+            <label>Volume:</label>
+            <input type="range" id="volume" min="0" max="1" step="0.01" value="1">
+        </div>
+
+        <div class="field">
+            <label>VU Meter:</label>
+            <div id="vu"><div id="vu-fill"></div></div>
+        </div>
+    </div>
+
+<script>
+
+const wsUrl = "ws://0.0.0.0:8123/";
+
+let audioCtx;
+let ws;
+let gainNode;
+let analyser;
+let vuData;
+let vuAnimHandle = null;
+
+const statusEl  = document.getElementById('status');
+const volumeEl  = document.getElementById('volume');
+
+document.getElementById('startBtn').onclick = () => {
+    if (!audioCtx) {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)({
+            sampleRate: 16000
+        });
+
+        // Gain node for volume control
+        gainNode = audioCtx.createGain();
+        gainNode.gain.value = parseFloat(volumeEl.value);
+
+        // Analyser for VU meter
+        analyser = audioCtx.createAnalyser();
+        analyser.fftSize = 1024;
+        vuData = new Uint8Array(analyser.fftSize);
+
+        // audio chain: src -> gain -> analyser -> destination
+        gainNode.connect(analyser);
+        analyser.connect(audioCtx.destination);
+
+        // Volume slider handler
+        volumeEl.addEventListener('input', (e) => {
+            gainNode.gain.value = parseFloat(e.target.value);
+        });
+
+        // Start VU meter loop
+        startVUMeter();
+    }
+
+    // Adjust hostname/port if needed
+    ws = new WebSocket(wsUrl);
+    ws.binaryType = "arraybuffer";
+
+    ws.onopen = () => {
+        statusEl.textContent = "Connected";
+    };
+
+    ws.onclose = () => {
+        statusEl.textContent = "Disconnected";
+    };
+
+    ws.onerror = (e) => {
+        statusEl.textContent = "Error: " + e;
+        console.error(e);
+    };
+
+    const AUDIO_BUFFER_MAX_SIZE = 16000;
+    let audioBuffer = [];
+
+    ws.onmessage = (event) => {
+
+        // 16-bit PCM audio
+        const arrayBuffer = event.data;
+        const intBuffer = new Int16Array(arrayBuffer);
+
+        // Convert to float
+        for (let i = 0; i < intBuffer.length; i++) {
+            if (audioBuffer.length < AUDIO_BUFFER_MAX_SIZE) {
+                audioBuffer.push(intBuffer[i] / 32767.0);
+            }
+        }
+    };
+
+    const audioBufferSource = audioCtx.createBufferSource();
+
+    const AUDIO_CTX_BUFFER_SIZE = 4096;
+
+    const scriptNode = audioCtx.createScriptProcessor(AUDIO_CTX_BUFFER_SIZE, 0, 1);
+
+    // Give the node a function to process audio events
+    scriptNode.addEventListener("audioprocess", (audioProcessingEvent) => {
+        
+        let outputBuffer = audioProcessingEvent.outputBuffer;
+        let outputData = outputBuffer.getChannelData(0);
+
+        let i = 0;
+        let inCount = Math.min(audioBuffer.length, AUDIO_CTX_BUFFER_SIZE)
+        for (; i < inCount; i++) {
+            // make output equal to the same as the input
+            outputData[i] = audioBuffer[i];
+        }
+        audioBuffer = audioBuffer.slice(i);
+
+        // Fill missing samples with silence
+        for (; i < AUDIO_BUFFER_MAX_SIZE; i++) {
+            outputData[i] = 0.0;
+        }
+    });
+
+    audioBufferSource.connect(scriptNode);
+    scriptNode.connect(gainNode);
+    audioBufferSource.start();
+
+    // When the buffer source stops playing, disconnect everything
+    audioBufferSource.addEventListener("ended", () => {
+        console.log("Script Ended")
+        audioBufferSource.disconnect(scriptNode);
+        scriptNode.disconnect(audioCtx.destination);
+    });
+
+};
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+function startVUMeter() {
+    if (!analyser || !vuData) return;
+
+    function draw() {
+        analyser.getByteTimeDomainData(vuData);
+
+        let peak = 0;
+        for (let i = 0; i < vuData.length; i++) {
+            const amp = Math.abs(vuData[i] - 128) / 128; // 0–1
+            if (amp > peak) peak = amp;
+        }
+
+        const level = Math.min(peak * 200, 100); // 0–100%
+        document.getElementById('vu-fill').style.width = level + "%";
+
+        vuAnimHandle = requestAnimationFrame(draw);
+    }
+
+    if (!vuAnimHandle) {
+        draw();
+    }
+}
+</script>
+</body>
+</html>
