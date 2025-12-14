@@ -107,25 +107,80 @@ class Scanner():
                 return cc
         return None
 
-    def enableChannel(self, channelId, enable: bool=True):
+    ###################################################################
+    #                                                                 #
+    #                  Scanner Commands / UI Actions                  #
+
+    def sendScannerMsg(self, msg):
+        for oq in self._outputQueues:
+            oq.put(msg)
+        for cb in self._processQueueCallbacks:
+            cb()
+
+    def _checkInputQueues(self):
+        """
+        Check the Scanner input queues for commands / config updates
+        """
+        for iq in self._inputQueues:
+            try:
+                while True:
+                    data = iq.get(False)
+                    if data['type'] == "ChannelEnable":
+                        channelId = data['data']['id']
+                        enabled = bool(data['data']['enabled'])
+                        self._channelEnable(channelId, enabled)
+                    elif data['type'] == "ChannelMute":
+                        channelId = data['data']['id']
+                        mute = bool(data['data']['mute'])
+                        self._channelMute(channelId, mute)
+                    elif data['type'] == "ChannelSolo":
+                        channelId = data['data']['id']
+                        solo = bool(data['data']['solo'])
+                        self._channelSolo(channelId, solo)
+                    elif data['type'] == "ChannelHold":
+                        channelId = data['data']['id']
+                        hold = bool(data['data']['hold'])
+                        self._channelHold(channelId, hold)
+                    elif data['type'] == "ChannelDisableUntil":
+                        channelId = data['data']['id']
+                        disableUntil = float(data['data']['disableUntil'])
+                        self._channelDisableUntil(channelId, disableUntil)
+                    elif data['type'] == "ChannelForceActive":
+                        channelId = data['data']['id']
+                        forceActive = bool(data['data']['forceActive'])
+                        self._channelForceActive(channelId, forceActive)
+
+
+                    iq.task_done()
+            except queue.Empty:
+                pass
+
+    def _channelEnable(self, channelId, enable: bool=True):
         cc = self.getChannelById(channelId)
         if not cc:
             raise Exception(f"Channel '{channelId}' not found")
-        if cc.isEnabled != enable:
-            cc.enable(enable)
-            self._configDirty = True
 
-    def disableChannelUntil(self, channelId, disableUntil: float):
+        if cc.isEnabled() != enable:
+            self._configDirty = True
+        cc.enable(enable)
+
+    def _channelDisableUntil(self, channelId, disableUntil: float):
+        """
+        disableUnitl
+            (float) Unix time
+        """
         if time.time() >= disableUntil:
             print("WARNING: disableUntil in past")
             return
         cc = self.getChannelById(channelId)
         if not cc:
             raise Exception(f"Channel '{channelId}' not found")
-        cc.disableUntil = disableUntil
-        self.enableChannel(channelId, False)
 
-    def muteChannel(self, channelId, mute):
+        if cc.isEnabled():
+            self._configDirty = True
+        cc.disableUntil(disableUntil)
+
+    def _channelMute(self, channelId, mute):
         cc = self.getChannelById(channelId)
         if not cc:
             raise Exception(f"Channel '{channelId}' not found")
@@ -144,7 +199,7 @@ class Scanner():
             ])
         self.sendUpdatedChannelConfig(cc)
 
-    def soloChannel(self, channelId, solo: bool):
+    def _channelSolo(self, channelId, solo: bool):
         cc = self.getChannelById(channelId)
         if not cc:
             raise Exception(f"Channel '{channelId}' not found")
@@ -173,7 +228,7 @@ class Scanner():
                 ])
             self.sendUpdatedChannelConfig(cc)
 
-    def holdChannel(self, channelId, hold):
+    def _channelHold(self, channelId, hold):
         cc = self.getChannelById(channelId)
         if not cc:
             raise Exception(f"Channel '{channelId}' not found")
@@ -192,7 +247,7 @@ class Scanner():
             ])
         self.sendUpdatedChannelConfig(cc)
 
-    def channelForceActive(self, channelId, forceActive=True):
+    def _channelForceActive(self, channelId, forceActive=True):
         cc = self.getChannelById(channelId)
         if not cc:
             raise Exception(f"Channel '{channelId}' not found")
@@ -211,6 +266,13 @@ class Scanner():
             ])
         self.sendUpdatedChannelConfig(cc)
         
+    #                  Scanner Commands / UI Actions                  #
+    #                                                                 #
+    ###################################################################
+
+    ###################################################################
+    #                                                                 #
+    #                Receiver Communicaiton / Control                 #
 
     def sendUpdatedChannelConfig(self, channelConfig):
         """
@@ -219,8 +281,45 @@ class Scanner():
         for oq in self._outputQueues:
             oq.put({
                 'type': 'ChannelConfig',
-                'data': channelConfig.asConfigDict(),
+                'data': channelConfig.getJson(),
             })
+
+    def processReceiverMsg(self, receiverId, msg):
+        for item in msg:
+            if item['type'] == 'window_done':
+                windowId = item['data']
+                self._windowLastScan[windowId] = time.time()
+                self._receiverCurrentScanWindow[receiverId] = None
+                self.sendScannerMsg({
+                    "type": "ScanWindowDone",
+                    "data": {
+                        "id": windowId,
+                    }
+                })
+            elif item['type'] == 'channel_status':
+                self.sendScannerMsg({
+                    "type": "ChannelStatus",
+                    "data": item['data']
+                })
+
+    def syncToReceivers(self):
+        for receiver, pipe, process in self._receiverProcesses:
+            pipe.send([
+                {
+                    'type': 'config',
+                    'data': {
+                        'scanWindows': [swc.getJson() for swc in self.scanWindowConfigs],
+                    },
+                }
+            ])
+
+    #                Receiver Communicaiton / Control                 #
+    #                                                                 #
+    ###################################################################
+
+    ###################################################################
+    #                                                                 #
+    #                          Scan Windows                           #
 
     def buildWindows(self):
         if not self.receiverConfigs:
@@ -252,41 +351,6 @@ class Scanner():
             "type": "ScanWindowConfigsChanged"
         })
 
-    def sendScannerMsg(self, msg):
-        for oq in self._outputQueues:
-            oq.put(msg)
-        for cb in self._processQueueCallbacks:
-            cb()
-
-    def processReceiverMsg(self, receiverId, msg):
-        for item in msg:
-            if item['type'] == 'window_done':
-                windowId = item['data']
-                self._windowLastScan[windowId] = time.time()
-                self._receiverCurrentScanWindow[receiverId] = None
-                self.sendScannerMsg({
-                    "type": "ScanWindowDone",
-                    "data": {
-                        "id": windowId,
-                    }
-                })
-            elif item['type'] == 'channel_status':
-                self.sendScannerMsg({
-                    "type": "ChannelStatus",
-                    "data": item['data']
-                })
-
-    def syncToReceivers(self):
-        for receiver, pipe, process in self._receiverProcesses:
-            pipe.send([
-                {
-                    'type': 'config',
-                    'data': {
-                        'scanWindows': self.scanWindowConfigs,
-                    },
-                }
-            ])
-
     def getNextScanWindow(self):
         # Future:
         #   - Give priority to any windows with a Hold
@@ -306,14 +370,18 @@ class Scanner():
                         targetTime = compTime
         return targetId
 
+    #                          Scan Windows                           #
+    #                                                                 #
+    ###################################################################
+
     def runMaintenance(self):
         self._nextMaintenanceTime = time.time()
 
         ###
         # Check if there are any channels that need re-enabled.
         for cc in self.channelConfigs:
-            if cc.disableUntil is not None and time.time() > cc.disableUntil:
-                self.enableChannel(cc.id, True)
+            if cc._disableUntil is not None and time.time() > cc._disableUntil:
+                self._channelEnable(cc.id, True)
 
     def runReceiverProcesses(self):
 
@@ -369,18 +437,8 @@ class Scanner():
 
             ###
             # Check input queues
-            for iq in self._inputQueues:
-                try:
-                    while True:
-                        data = iq.get(False)
-                        if data['type'] == "ChannelEnable":
-                            channelId = data['data']['id']
-                            enabled = bool(data['data']['enabled'])
-                            self.enableChannel(channelId, enabled)
-
-                        iq.task_done()
-                except queue.Empty:
-                    pass
+            
+            self._checkInputQueues()
 
             ###
             # Run Maintenance

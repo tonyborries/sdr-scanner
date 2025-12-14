@@ -2,17 +2,23 @@ import collections
 from multiprocessing import shared_memory, Process, Value
 import numpy as np
 import os
-import pyaudio
 import socket
 import threading
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Generator, List, Optional, Tuple
 
 from gnuradio import gr
 
 from .const import AUDIO_SAMPLERATE
 from .hpSharedMem import HighPerformanceCircularBuffer
 
+
+LOCAL_AUDIO_SUPPORT = True
+try:
+    import pyaudio
+except ImportError:
+    LOCAL_AUDIO_SUPPORT = False
+    print("Warning: Missing pyAudio, Local Audio support not available.")
 
 ICECAST_SUPPORT = True
 try:
@@ -143,7 +149,7 @@ class AudioServer(object):
             inputStreamHeadIdxs: List[Any],
             inputStreamTailIdxs: List[Any],
             outputConfigDicts: List[Dict[Any, Any]],
-        ):
+        ) -> None:
         self._numInputStreams = numInputStreams
         self.inputStreamShmBuffers = inputStreamShmBuffers
         self.inputStreamHeadIdxs = inputStreamHeadIdxs
@@ -168,13 +174,13 @@ class AudioServer(object):
 
         self._stopFlag = False
 
-    def stop(self):
+    def stop(self) -> None:
         self._stopFlag = True
 
-    def run(self):
+    def run(self) -> None:
         print("Audio Server Running")
 
-        mixBuffers = []
+        mixBuffers: List[collections.deque] = []
         for i in range(0, self._numInputStreams):
             mixBuffers.append( collections.deque(maxlen=self.BUFFER_LEN) )
 
@@ -184,7 +190,7 @@ class AudioServer(object):
         try:
             os.nice(-5)
         except Exception as e:
-            print("Couldn't nice ourself")
+            print("Couldn't nice ourself (only root can)")
             print(e)
 
         ###
@@ -195,9 +201,8 @@ class AudioServer(object):
         while not self._stopFlag:
             # Read ShmBuffers
             for i in range(0, self._numInputStreams):
-                inBuf = []
+                inBuf: List[float] = []
                 numRead = self.inputStreamCircularBuffers[i].read(inBuf)
-                # print(f"{len(mixBuffers[i])}  ", end='')
                 if numRead:
                     mixBuffers[i].extend(inBuf)
             # print("")
@@ -251,22 +256,22 @@ class AudioServer(object):
         inputStreamHeadIdxs: List[Any],
         inputStreamTailIdxs: List[Any],
         outputConfigDicts: List[Dict[Any, Any]],
-    ):
+    ) -> None:
         audioServer = cls(numInputStreams, inputStreamShmBuffers, inputStreamHeadIdxs, inputStreamTailIdxs, outputConfigDicts)
         audioServer.run()
 
 
 class AudioServerOutput_Base(object):
-    def __init__(self):
+    def __init__(self) -> None:
         pass
 
-    def reconnect(self):
+    def reconnect(self) -> None:
         raise NotImplementedError()
 
-    def close(self):
+    def close(self) -> None:
         raise NotImplementedError()
     
-    def send(self, samples: List[int]):
+    def send(self, samples: List[int]) -> None:
         raise NotImplementedError()
 
 
@@ -276,13 +281,13 @@ class AudioServerOutput_Local(AudioServerOutput_Base):
     """
     FRAMES_PER_BUFFER = 1000
 
-    def __init__(self):
-        self._outputBuffer = collections.deque(maxlen=self.FRAMES_PER_BUFFER * 4)
+    def __init__(self) -> None:
+        self._outputBuffer: collections.deque = collections.deque(maxlen=self.FRAMES_PER_BUFFER * 4)
 
         self._pyaudio: Optional[pyaudio.PyAudio] = None
         self._pyaudioStream: Optional[pyaudio.Stream] = None
 
-    def reconnect(self):
+    def reconnect(self) -> None:
         """
         Initial connect or reconnect
         """
@@ -305,7 +310,7 @@ class AudioServerOutput_Local(AudioServerOutput_Base):
         # Dump outputBuffer 
         self._outputBuffer.clear()
 
-    def close(self):
+    def close(self) -> None:
         if self._pyaudioStream is not None:
             try:
                 self._pyaudioStream.close()
@@ -322,7 +327,7 @@ class AudioServerOutput_Local(AudioServerOutput_Base):
                 print(e)
             self._pyaudio = None
 
-    def _pyAudioCb(self, in_data, frame_count, time_info, status):
+    def _pyAudioCb(self, in_data, frame_count, time_info, status) -> Tuple[bytes, int]:
 
         # If len(data) is less than requested frame_count, PyAudio automatically
         # assumes the stream is finished, and the stream stops - provide 0s if empty buffer
@@ -347,7 +352,7 @@ class AudioServerOutput_Local(AudioServerOutput_Base):
 
         return (outdata.tobytes(), pyaudio.paContinue)
 
-    def send(self, samples: List[int]):
+    def send(self, samples: List[int]) -> None:
         self._outputBuffer.extend(samples)
 
         if self._pyaudioStream is None or not self._pyaudioStream.is_active():
@@ -366,14 +371,14 @@ class AudioServerOutput_UDP(AudioServerOutput_Base):
     SAMPLES_PER_PACKET = 100
     BUFFER_LEN = 10000
 
-    def __init__(self, serverIp, serverPort):
-        self._outputBuffer = collections.deque(maxlen=self.BUFFER_LEN)
+    def __init__(self, serverIp, serverPort) -> None:
+        self._outputBuffer: collections.deque = collections.deque(maxlen=self.BUFFER_LEN)
 
         self._socket: Optional[socket.socket] = None
         self._serverIp = serverIp
         self._serverPort = serverPort
 
-    def reconnect(self):
+    def reconnect(self) -> None:
         """
         Initial connect or reconnect
         """
@@ -384,7 +389,7 @@ class AudioServerOutput_UDP(AudioServerOutput_Base):
         # Dump outputBuffer 
         self._outputBuffer.clear()
 
-    def close(self):
+    def close(self) -> None:
         if self._socket is not None:
             try:
                 self._socket.close()
@@ -393,10 +398,10 @@ class AudioServerOutput_UDP(AudioServerOutput_Base):
                 print(e)
             self._socket = None
 
-    def send(self, samples: List[int]):
+    def send(self, samples: List[int]) -> None:
         self._outputBuffer.extend(samples)
         while len(self._outputBuffer) > self.SAMPLES_PER_PACKET:
-            outdata = np.ndarray([self.SAMPLES_PER_PACKET],  dtype=np.int16)
+            outdata: np.ndarray = np.ndarray([self.SAMPLES_PER_PACKET],  dtype=np.int16)
 
             for i in range(0, self.SAMPLES_PER_PACKET):
                 outdata[i] = self._outputBuffer.popleft()
@@ -419,74 +424,69 @@ class AudioServerOutput_Icecast(AudioServerOutput_Base):
     SAMPLES_PER_FRAME = AUDIO_SAMPLERATE // 4
     BUFFER_LEN = SAMPLES_PER_FRAME * 3
 
-    def __init__(self, url, password):
-        self._outputBuffer = collections.deque(maxlen=self.BUFFER_LEN)
+    def __init__(self, url, password) -> None:
+        self._outputBuffer: collections.deque = collections.deque(maxlen=self.BUFFER_LEN)
 
         self._url = url
         self._password = password
         self._mp3Bitrate = 48000
 
-        self._mp3Encoder = None
+        self._stopEvent: Optional[threading.Event] = None
+        self._streamingThread: Optional[threading.Thread] = None
 
-        self._session = None
-        self._stopEvent = None
-        self._streamingThread = None
-
-    def reconnect(self):
+    def reconnect(self) -> None:
         """
         Initial connect or reconnect
         """
         self.close()
-
-        # MP3 encoder
-        self._mp3Encoder = lameenc.Encoder()
-        self._mp3Encoder.set_bit_rate(self._mp3Bitrate)
-        self._mp3Encoder.set_in_sample_rate(AUDIO_SAMPLERATE)
-        self._mp3Encoder.set_channels(1)
-        self._mp3Encoder.set_quality(2)
-
-        # Requests Session
-        self._session = requests.Session()
 
         # Launch Streaming thread
         self._stopEvent = threading.Event()
         self._streamingThread = threading.Thread(target=self._runIcecastStream, daemon=True, args=(self._stopEvent, ))
         self._streamingThread.start()
 
-    def close(self):
+    def close(self) -> None:
         if self._stopEvent is not None:
             self._stopEvent.set()
             self._stopEvent = None
-
-        if self._mp3Encoder is not None:
-            self._mp3Encoder = None
 
         if self._streamingThread is not None:
             self._streamingThread.join()
             self._streamingThread = None
 
-    def _streamDataGen(self, stopEvt):
+    def _streamDataGen(self, stopEvt) -> Generator[bytes, None, None]:
+        # MP3 encoder
+        mp3Encoder = lameenc.Encoder()
+        if mp3Encoder is None:
+            print("ERROR: Failed initializing MP3 encoding for Icecast")
+            return
+        mp3Encoder.set_bit_rate(self._mp3Bitrate)
+        mp3Encoder.set_in_sample_rate(AUDIO_SAMPLERATE)
+        mp3Encoder.set_channels(1)
+        mp3Encoder.set_quality(2)
+
         while not stopEvt.is_set():
             if len(self._outputBuffer) >= self.SAMPLES_PER_FRAME:
-                samps = np.ndarray([self.SAMPLES_PER_FRAME],  dtype=np.int16)
+                samps: np.ndarray = np.ndarray([self.SAMPLES_PER_FRAME],  dtype=np.int16)
                 for i in range(0, self.SAMPLES_PER_FRAME):
                     samps[i] = self._outputBuffer.popleft()
 
-                mp3out = self._mp3Encoder.encode(samps.tobytes())
+                mp3out = mp3Encoder.encode(samps.tobytes())
                 if mp3out:
                     yield mp3out
             else:
                 time.sleep(0.1)
 
-    def _runIcecastStream(self, stopEvt):
+    def _runIcecastStream(self, stopEvt) -> None:
         while not stopEvt.is_set():
+            session = requests.Session()
             try:
                 print(f"Connecting to Icecast Stream: {self._url}")
 
                 # Dump outputBuffer 
                 self._outputBuffer.clear()
 
-                resp = self._session.put(
+                resp = session.put(
                     self._url,
                     data=self._streamDataGen(stopEvt),
                     auth=("source", self._password),
@@ -504,6 +504,6 @@ class AudioServerOutput_Icecast(AudioServerOutput_Base):
                 time.sleep(0.001)
         print("Exiting Icecast Thread")
 
-    def send(self, samples: List[int]):
+    def send(self, samples: List[int]) -> None:
         self._outputBuffer.extend(samples)
 

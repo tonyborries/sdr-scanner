@@ -151,8 +151,9 @@ class Receiver():
     def applyConfigDict(self, configDict):
         self._scanWindowsById = {}
 
-        for swc in configDict['scanWindows']:
-            self._scanWindowsById[swc.id] = ScanWindow.fromConfig(swc)
+        for swData in configDict['scanWindows']:
+            sw = ScanWindow.fromJson(swData)
+            self._scanWindowsById[sw.id] = sw
 
     def getScanWindow(self, swId):
         return self._scanWindowsById[swId]

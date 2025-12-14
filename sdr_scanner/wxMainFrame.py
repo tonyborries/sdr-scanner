@@ -545,28 +545,70 @@ class ChannelConfigPanelManager(BasePanelManager):
 
     def onBtnHold(self, event):
         hold = self.btnHold.GetValue()
-        self._scanner.holdChannel(self.channelConfig.id, hold)
+        uiToScannerQueue.put({
+            'type': "ChannelHold",
+            'data': {
+                'id': self.channelConfig.id,
+                'hold': hold,
+            }
+        })
 
     def onBtnSolo(self, event):
         solo = self.btnSolo.GetValue()
-        self._scanner.soloChannel(self.channelConfig.id, solo)
+        uiToScannerQueue.put({
+            'type': "ChannelSolo",
+            'data': {
+                'id': self.channelConfig.id,
+                'solo': solo,
+            }
+        })
 
     def onBtnMute(self, event):
         mute = self.btnMute.GetValue()
-        self._scanner.muteChannel(self.channelConfig.id, mute)
+        uiToScannerQueue.put({
+            'type': "ChannelMute",
+            'data': {
+                'id': self.channelConfig.id,
+                'mute': mute,
+            }
+        })
 
     def onBtnDisable(self, event):
         enabled = not self.btnDisable.GetValue()
-        self._scanner.enableChannel(self.channelConfig.id, enabled)
+        uiToScannerQueue.put({
+            'type': "ChannelEnable",
+            'data': {
+                'id': self.channelConfig.id,
+                'enabled': enabled,
+            }
+        })
 
     def onBtnDisable1Hr(self, event):
-        self._scanner.disableChannelUntil(self.channelConfig.id, time.time() + 3600.0)
+        uiToScannerQueue.put({
+            'type': "ChannelDisableUntil",
+            'data': {
+                'id': self.channelConfig.id,
+                'disableUntil': time.time() + 3600.0,
+            }
+        })
 
     def onBtnPlay(self, event):
-        self._scanner.channelForceActive(self.channelConfig.id, not self.channelConfig.forceActive)
+        uiToScannerQueue.put({
+            'type': "ChannelForceActive",
+            'data': {
+                'id': self.channelConfig.id,
+                'forceActive': not self.channelConfig.forceActive
+            }
+        })
 
     def onBtnPause(self, event):
-        self._scanner.channelForceActive(self.channelConfig.id, False)
+        uiToScannerQueue.put({
+            'type': "ChannelForceActive",
+            'data': {
+                'id': self.channelConfig.id,
+                'forceActive': False,
+            }
+        })
 
 
 class MainFrame(wx.Frame):

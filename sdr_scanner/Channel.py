@@ -37,7 +37,7 @@ class ChannelMode(IntEnum):
     FM = 1
     NFM = 2
     AM = 3
-    NOAA_EAS = 4
+    NOAA = 4
     BFM_EAS = 5
     USB = 6
     LSB = 7
@@ -134,22 +134,24 @@ class ChannelConfig():
         self.squelchThreshold = squelchThreshold
 
         self._enabled = True
-        self.disableUntil: Optional[float] = None
+        self._disableUntil: Optional[float] = None
         self.mute = mute
         self.solo = solo
         self.hold = hold
         self.forceActive = False
 
     def enable(self, enable: bool=True):
-        if enable:
-            self.disableUntil = None
+        self._disableUntil = None
         self._enabled = enable
 
+    def disableUntil(self, disableUntilTime: float):
+        self._disableUntil = disableUntilTime
+        self._enabled = False
+
     def isEnabled(self) -> bool:
-        if self.disableUntil is not None:
-            if time.time() > self.disableUntil:
-                self.disableUntil = None
-                return True
+        if self._disableUntil is not None:
+            if time.time() > self._disableUntil:
+                self._disableUntil = None
             return False
         return self._enabled
 
@@ -179,7 +181,7 @@ class ChannelConfig():
             "FM": ChannelMode.FM,
             "NFM": ChannelMode.NFM,
             "AM": ChannelMode.AM,
-            "NOAA": ChannelMode.NOAA_EAS,
+            "NOAA": ChannelMode.NOAA,
             "BFM_EAS": ChannelMode.BFM_EAS,
             'USB': ChannelMode.USB,
             'LSB': ChannelMode.LSB,
@@ -218,7 +220,7 @@ class ChannelConfig():
         cc = ChannelConfig(**kwargs)
         return cc
 
-    def asConfigDict(self):
+    def getJson(self):
         return {
             'id': self.id,
             'freq_hz': self.freq_hz,
@@ -228,15 +230,16 @@ class ChannelConfig():
             'audioGain_dB': self.audioGain_dB,
             'squelchThreshold': self.squelchThreshold,
             'enabled': self._enabled,
-            'disableUntil': self.disableUntil,
+            'disableUntil': self._disableUntil,
             'mute': self.mute,
             'solo': self.solo,
             'hold': self.hold,
+            'forceActive': self.forceActive,
         }
 
 
 class Channel():
-    def __init__(self, channelId, freq_hz: int, label: str, mode: ChannelMode, audioGain_dB: float, dwellTime_s: float, squelchThreshold:float, hardwareFreq_hz, rfSampleRate, mute, solo, hold):
+    def __init__(self, channelId, freq_hz: int, label: str, mode: ChannelMode, audioGain_dB: float, dwellTime_s: float, squelchThreshold:float, hardwareFreq_hz, rfSampleRate, mute, solo, hold, forceActive=False):
 
         self.id = channelId
 
@@ -250,7 +253,7 @@ class Channel():
         self._mute = mute
         self._solo = solo
         self._hold = hold
-        self._forceActive = False
+        self._forceActive = forceActive
 
         self.hardwareFreq_hz = hardwareFreq_hz
 
@@ -287,7 +290,7 @@ class Channel():
             self.channelBlock = ChannelBlock_AM(
                 *chArgs,
             )
-        elif mode == ChannelMode.NOAA_EAS:
+        elif mode == ChannelMode.NOAA:
             self.channelBlock = ChannelBlock_EAS(
                 *chArgs,
                 deviation_hz=5000,
@@ -313,21 +316,28 @@ class Channel():
         if self.channelBlock is None:
             raise Exception("Channel Block not Initialized - Check Mode setting")
 
+        self.setForceActive(self._forceActive)
+
     @classmethod
-    def fromConfig(cls, cc: ChannelConfig, swc: "ScanWindowConfig"):
-        channel = Channel(
-            channelId=cc.id,
-            freq_hz=cc.freq_hz,
-            label=cc.label,
-            mode=cc.mode,
-            audioGain_dB=cc.audioGain_dB,
-            dwellTime_s=cc.dwellTime_s,
-            squelchThreshold=cc.squelchThreshold,
-            hardwareFreq_hz=swc.hardwareFreq_hz,
-            rfSampleRate=swc.rfSampleRate,
-            mute=cc.mute,
-            solo=cc.solo,
-            hold=cc.hold,
+    def fromJson(cls, data: Dict[str, Any], scanWindowHardwareFreq_hz: int, scanWindowRFSampleRate: int) -> "Channel":
+        mode = ChannelConfig.modeStrLookup(data['mode'])
+        if mode is None:
+            raise Exception(f"Unknown Channel Mode Type: ({data['mode']})")
+
+        channel = cls(
+            channelId=data['id'],
+            freq_hz=data['freq_hz'],
+            label=data['label'],
+            mode=mode,
+            audioGain_dB=data['audioGain_dB'],
+            dwellTime_s=data['dwellTime_s'],
+            squelchThreshold=data['squelchThreshold'],
+            hardwareFreq_hz=scanWindowHardwareFreq_hz,
+            rfSampleRate=scanWindowRFSampleRate,
+            mute=data['mute'],
+            solo=data['solo'],
+            hold=data['hold'],
+            forceActive=data['forceActive'],
         )
         return channel
 

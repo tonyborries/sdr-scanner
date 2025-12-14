@@ -204,6 +204,22 @@ changes are not persisted, and will be reset upon Scanner restart. The following
 - **Play** - Breaks the Squelch and forces the Channel Active. For example, on a NOAA channel, bypass the EAS Alert detection and listen live.
 - **Pause** - Resets the Squelch from a Forced Active, or reset the Alert detection on an EAS Channel.
 
+Docker
+------
+
+Blacklist kernel modules on host and reboot (or rmmod each)::
+
+    $ cat /etc/modprobe.d/blacklist-rtl.conf 
+    blacklist dvb_usb_rtl28xxu
+    blacklist rtl2832
+    blacklist rtl2830
+    blacklist dvb_core
+    blacklist dvb_usb_rtl2832u
+    blacklist dvb_usb_v2
+    blacklist r820t
+    blacklist rtl2832_sdr
+    blacklist rtl2838
+
 
 Channel Modes
 =============

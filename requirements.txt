@@ -1,3 +1,4 @@
 lameenc
+numpy
 requests
-wxPython
+pyYaml

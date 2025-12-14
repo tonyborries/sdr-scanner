@@ -1,4 +1,4 @@
-from typing import List
+from typing import Any, Dict, List
 import uuid
 
 from gnuradio import blocks
@@ -21,6 +21,13 @@ class ScanWindowConfig():
         for cc in sorted(self.channelConfigs, key=lambda x: x.freq_hz):
             cc.debugPrint()
 
+    def getJson(self):
+        return {
+            "id": self.id,
+            "hardwareFreq_hz": self.hardwareFreq_hz,
+            "rfSampleRate": self.rfSampleRate,
+            "channels": [ cc.getJson() for cc in self.channelConfigs ]
+        }
 
 class ScanWindow():
     """
@@ -43,17 +50,16 @@ class ScanWindow():
         self._minimumScanTime = None
 
     @classmethod
-    def fromConfig(cls, swc: ScanWindowConfig):
+    def fromJson(cls, data: Dict[str, Any]) -> "ScanWindow":
+        hardwareFreq_hz = data['hardwareFreq_hz']
+        rfSampleRate = data['rfSampleRate']
 
-        channels = []
-        for cc in swc.channelConfigs:
-            channels.append( Channel.fromConfig(cc, swc) )
-
+        channels = [ Channel.fromJson(cData, hardwareFreq_hz, rfSampleRate) for cData in data['channels'] ]
         sw = cls(
-            swc.id,
-            hardwareFreq_hz=swc.hardwareFreq_hz,
-            rfSampleRate=swc.rfSampleRate,
-            channels=channels
+            data['id'],
+            hardwareFreq_hz,
+            rfSampleRate,
+            channels,
         )
         return sw
 
