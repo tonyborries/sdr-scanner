@@ -5,6 +5,7 @@ import time
 from typing import Any, Dict, List, Optional
 import yaml
 
+from .const import MAX_RF_SAMPLERATE
 from .AudioServer import AudioServerConfig, AudioSender
 from .Channel import ChannelConfig
 from .Receiver import ReceiverConfig, runAsProcess
@@ -14,7 +15,7 @@ from .ScanWindow import ScanWindowConfig
 class Scanner():
     MAINTENANCE_LOOP_TIME_S = 60
 
-    def __init__(self):
+    def __init__(self) -> None:
 
         self.channelConfigs: List[ChannelConfig] = []
         self._channelConfigByIdCache = {}
@@ -23,6 +24,7 @@ class Scanner():
 
         self.receiverConfigs: List[ReceiverConfig] = []
         self._receiverProcesses = []  # tuples of (receiverConfig, receiver, pipe, process)
+        self._receiverSampleRates: Dict[Any, List[int]] = {}
 
         self._defaultChannelConfig = ChannelConfig(0, 'DEFAULT')
 
@@ -82,7 +84,6 @@ class Scanner():
                 cc = ChannelConfig.fromConfigDict(c, scanner._defaultChannelConfig)
 
                 scanner.channelConfigs.append(cc)
-            scanner.buildWindows()
 
         return scanner
 
@@ -301,6 +302,8 @@ class Scanner():
                     "type": "ChannelStatus",
                     "data": item['data']
                 })
+            elif item['type'] == 'sample_rates':
+                self._receiverSampleRates[receiverId] = item['data']
 
     def syncToReceivers(self):
         for receiver, pipe, process in self._receiverProcesses:
@@ -324,7 +327,14 @@ class Scanner():
     def buildWindows(self):
         if not self.receiverConfigs:
             raise Exception("No Receivers Configured")
-        bandwidth = min( [ max(r.getSampleRates()) for r in self.receiverConfigs] )
+
+        bandwidth = min(
+            [ max( 
+                [rate for rate in self._receiverSampleRates[r.id] if rate <= MAX_RF_SAMPLERATE]
+            ) for r in self.receiverConfigs ]
+        )
+
+        print(bandwidth)
 
         BAND_EDGE_MARGIN = 200_000
 
@@ -395,11 +405,17 @@ class Scanner():
 
         while True:
 
-            self._runReceivers()
+            try:
 
-            if self._configDirty:
-                self._configDirty = False
-                self.buildWindows()
+                self._runReceivers()
+
+                if self._configDirty:
+                    self._configDirty = False
+                    # self.buildWindows()
+            except Exception as e:
+                print(e)
+                print("Killing Scanner")
+                self._stopFlag = True
 
             if self._stopFlag:
                 audioServerProcess.kill()
@@ -409,6 +425,7 @@ class Scanner():
     def _runReceivers(self):
 
         self._receiverProcesses = []
+        self._receiverSampleRates = {}
 
 
         ###
@@ -419,11 +436,29 @@ class Scanner():
 
             receiverPipe, remotePipe = Pipe()
 
-            p = Process(target=runAsProcess, args=(remotePipe, rxConfig, *self.audioServerConfig.getInputShmBuffers(i) ))
+            p = Process(target=runAsProcess, daemon=True, args=(remotePipe, rxConfig, *self.audioServerConfig.getInputShmBuffers(i) ))
             self._receiverProcesses.append( (rxConfig, receiverPipe, p) )
             p.start()
+
+            # Wait for the receiver to report back it's sample rates
+            timeoutTime = time.time() + 10.0
+            wait = True
+            while wait:
+                time.sleep(0.001)
+                if time.time() > timeoutTime:
+                    raise Exception("Timed out waiting for Receiver SampleRates")
+                while receiverPipe.poll():
+                    msg = receiverPipe.recv()
+                    self.processReceiverMsg(rxConfig.id, msg)
+                wait = rxConfig.id not in self._receiverSampleRates
+
+
             self._receiverCurrentScanWindow[rxConfig.id] = None
             i += 1
+
+
+        # Now we can build the windows
+        self.buildWindows()
 
         ###
         # Sync Config
@@ -452,7 +487,7 @@ class Scanner():
             for rxConfig, pipe, process in self._receiverProcesses:
 
                 # Check if there are any messages in the Pipes
-                if pipe.poll():
+                while pipe.poll():
                     msg = pipe.recv()
                     self.processReceiverMsg(rxConfig.id, msg)
 

@@ -7,5 +7,6 @@ services:
     volumes:
       - .:/app
       - /dev/usb:/dev/usb
+      - /dev/bus/usb:/dev/bus/usb
     restart: no
     command: python3 cli_scan.py -c sdrscan.yaml

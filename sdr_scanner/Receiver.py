@@ -13,7 +13,7 @@ from gnuradio import audio
 from gnuradio import gr
 from gnuradio import soapy
 
-from .const import AUDIO_SAMPLERATE
+from .const import AUDIO_SAMPLERATE, BFM_QUAD_RATE, FM_QUAD_RATE, MAX_RF_SAMPLERATE
 from .AudioServer import AudioSender, AudioSender_grEmbeddedPythonBlock
 from .Channel import Channel
 from .ScanWindow import ScanWindow, ScanWindowConfig
@@ -22,6 +22,7 @@ from .ScanWindow import ScanWindow, ScanWindowConfig
 class ReceiverType(IntEnum):
     UNKNOWN = 0
     RTL_SDR = 1
+    SOAPY   = 2
 
 
 class ReceiverStatus(IntEnum):
@@ -33,22 +34,24 @@ class ReceiverStatus(IntEnum):
 
 class ReceiverBlock(gr.top_block):
 
-    def __init__(self, deviceArg):
-        gr.top_block.__init__(self, "RTL-SDR Rx", catch_exceptions=True)
+    def __init__(self, receiverArgs) -> None:
+        gr.top_block.__init__(self, "SDR Rx", catch_exceptions=True)
 
-        self.deviceArg = deviceArg
+        self._receiverArgs = receiverArgs
 
         self.status: ReceiverStatus = ReceiverStatus.IDLE
         self._windowTimeout = 0.0
         self._scanWindow: Optional[ScanWindow] = None
 
-    def setupWindow(self, scanWindow, audioSink):
+        self._cachedSampleRates: Optional[List[int]] = None
+
+    def setupWindow(self, scanWindow, audioSink) -> None:
         raise NotImplementedError()
 
-    def teardownWindow(self, scanWindow, audioSink):
+    def teardownWindow(self, scanWindow, audioSink) -> None:
         raise NotImplementedError()
 
-    def startWindow(self):
+    def startWindow(self) -> None:
         if self._scanWindow is None:
             raise Exception("ScanWindow not configured")
 
@@ -56,7 +59,7 @@ class ReceiverBlock(gr.top_block):
         self.start()
         self._windowTimeout = time.time() + self._scanWindow.getMinimumScanTime()
 
-    def stopWindow(self):
+    def stopWindow(self) -> None:
         self.stop()
         self.wait()
         self.status = ReceiverStatus.IDLE
@@ -73,6 +76,9 @@ class ReceiverBlock(gr.top_block):
             return False
         return True
 
+    def getSampleRates(self) -> List[int]:
+        raise NotImplementedError()
+
 
 class Receiver_RTLSDR(ReceiverBlock):
 
@@ -86,8 +92,14 @@ class Receiver_RTLSDR(ReceiverBlock):
 #        2_560_000,  temp disable to force sticking with 2048
     ]
 
-    def __init__(self, deviceArg=''):
-        super().__init__(deviceArg)
+    def __init__(self, receiverArgs):
+        super().__init__(receiverArgs)
+
+        self._receiverArgs = receiverArgs
+
+        deviceArg = ''
+        if 'deviceArg' in self._receiverArgs:
+            deviceArg = self._receiverArgs['deviceArg']
 
         self.soapy_rtlsdr_source_0 = None
         dev = 'driver=rtlsdr'
@@ -95,15 +107,19 @@ class Receiver_RTLSDR(ReceiverBlock):
         tune_args = ['']
         settings = ['']
 
-        self.soapy_rtlsdr_source_0 = soapy.source(dev, "fc32", 1, self.deviceArg, stream_args, tune_args, settings)
+        self._gain = 20
+        if 'gain' in self._receiverArgs:
+            self._gain = self._receiverArgs['gain']
+
+        self.soapy_rtlsdr_source_0 = soapy.source(dev, "fc32", 1, deviceArg, stream_args, tune_args, settings)
         self.soapy_rtlsdr_source_0.set_gain_mode(0, False)
         self.soapy_rtlsdr_source_0.set_frequency_correction(0, 0)
-        self.soapy_rtlsdr_source_0.set_gain(0, 'TUNER', 20)
+        self.soapy_rtlsdr_source_0.set_gain(0, 'TUNER', self._gain)
 
     def __str__(self):
-        return f"RTL-SDR {self.deviceArg}"
+        return f"RTL-SDR {self._receiverArgs}"
 
-    def setupWindow(self, scanWindow, audioSink):
+    def setupWindow(self, scanWindow, audioSink) -> None:
 
         self._scanWindow = scanWindow
 
@@ -115,20 +131,134 @@ class Receiver_RTLSDR(ReceiverBlock):
         self.connect( (scanWindow.scanWindowBlock, 0), (audioSink, 0) )
         self.connect( (self.soapy_rtlsdr_source_0, 0), (scanWindow.scanWindowBlock, 0) )
 
-    def teardownWindow(self, scanWindow, audioSink):
+    def teardownWindow(self, scanWindow, audioSink) -> None:
         # disconnect
         self.disconnect( (self.soapy_rtlsdr_source_0, 0), (scanWindow.scanWindowBlock, 0) )
         self.disconnect( (scanWindow.scanWindowBlock, 0), (audioSink, 0) )
 
+    def getSampleRates(self) -> List[int]:
+        return self.SAMPLE_RATES
+
+
+class Receiver_SOAPY(ReceiverBlock):
+
+    def __init__(self, receiverArgs):
+        super().__init__(receiverArgs)
+
+        self._rxChannel = 0
+
+        self._receiverArgs = receiverArgs
+
+        self._deviceArg = ''
+        if 'deviceArg' in self._receiverArgs:
+            self._deviceArg = self._receiverArgs['deviceArg']
+
+        self.blockSoapySource = None
+        self._dev = f"driver={self._receiverArgs['driver']}"
+        self._stream_args = ''
+        self._tune_args = ['']
+        self._settings = ['']
+
+        self.blockSoapySource = None
+        self._buildSourceBlock()
+
+        self._rxGain = 20
+        if 'gain' in receiverArgs:
+            self._rxGain = receiverArgs['gain']
+
+        self._rxGains = {}
+        if 'gains' in receiverArgs:
+            self._rxGains = receiverArgs['gains']
+
+    def _buildSourceBlock(self) -> None:
+        if self.blockSoapySource is None:
+            self.blockSoapySource = soapy.source(self._dev, "fc32", 1, self._deviceArg, self._stream_args, self._tune_args, self._settings)
+            if self.blockSoapySource is None:
+                raise Exception("Failed Opening Receiver")
+
+    def __str__(self):
+        return f"SOAPY-SDR {self._receiverArgs}"
+
+    def setupWindow(self, scanWindow, audioSink) -> None:
+
+        self._buildSourceBlock()
+
+        self._scanWindow = scanWindow
+
+        # tune radio to window center freq
+        self.blockSoapySource.set_sample_rate(0, scanWindow.rfSampleRate)
+        self.blockSoapySource.set_frequency(0, scanWindow.hardwareFreq_hz)
+
+        self.blockSoapySource.set_gain_mode(0, False)
+        if self._rxGains:
+            for name, gain in self._rxGains.items():
+                self.blockSoapySource.set_gain(self._rxChannel, name, gain)
+        else:
+            self.blockSoapySource.set_gain(self._rxChannel, self._rxGain)
+
+        self.blockSoapySource.set_frequency_correction(0, 0)
+
+        # connect window to receiver and output audio
+        self.connect( (scanWindow.scanWindowBlock, 0), (audioSink, 0) )
+        self.connect( (self.blockSoapySource, 0), (scanWindow.scanWindowBlock, 0) )
+
+    def teardownWindow(self, scanWindow, audioSink) -> None:
+        # disconnect
+        self.disconnect( (self.blockSoapySource, 0), (scanWindow.scanWindowBlock, 0) )
+        self.disconnect( (scanWindow.scanWindowBlock, 0), (audioSink, 0) )
+        self.blockSoapySource = None
+
+    def getSampleRates(self) -> List[int]:
+        
+        if self._cachedSampleRates is not None:
+            return self._cachedSampleRates
+
+        rates = set()
+        for rateRange in self.blockSoapySource.get_sample_rate_range(self._rxChannel):
+            rates.add(rateRange.minimum())
+            rates.add(rateRange.maximum())
+        rates = {int(x) for x in rates}
+        
+        def _factors(i: int):
+            """
+            Returns a list of prime factors
+            """
+            if i <= 0:
+                raise Exception("Can't handle <= 0")
+
+            factors = []
+            n = 2
+            while n ** 2 <= i:
+                while i % n == 0:
+                    factors.append(n)
+                    i //= n
+                n += 1
+        
+            return factors
+
+        # prefer rates we can divide down in to AUDIO_SAMPLERATE in multiple steps
+        preferredRates = set()
+        for rate in rates:
+            if rate < MAX_RF_SAMPLERATE and len(_factors(rate)) >= 4 and rate % (AUDIO_SAMPLERATE) == 0:
+                preferredRates.add(rate)
+        if preferredRates:
+            print(f"Receiver using preferred rates: {preferredRates}")
+            rates = preferredRates
+
+        self._cachedSampleRates = list(rates)
+        return self._cachedSampleRates
+
 
 def lookupRxType(rxTypeStr) -> ReceiverType:
     return {
-        'RTL-SDR': ReceiverType.RTL_SDR
-    }.get(rxTypeStr, ReceiverType.UNKNOWN)
+        'RTL-SDR': ReceiverType.RTL_SDR,
+        'SOAPY': ReceiverType.SOAPY,
+    }.get(rxTypeStr.upper(), ReceiverType.UNKNOWN)
 
 def lookupRxBlockCls(rxType: ReceiverType) -> type["ReceiverBlock"]:
     return {
-        ReceiverType.RTL_SDR: Receiver_RTLSDR
+        ReceiverType.RTL_SDR: Receiver_RTLSDR,
+        ReceiverType.SOAPY: Receiver_SOAPY,
     }[rxType]
 
 
@@ -140,22 +270,22 @@ class Receiver():
 
         self._scanWindowsById: Dict[Any, ScanWindow] = {}
 
-        self._receiverBlock = lookupRxBlockCls(self.rxType)(**self.receiverArgs)
+        self._receiverBlock = lookupRxBlockCls(self.rxType)(self.receiverArgs)
 
     def __str__(self):
         return f"Receiver: {str(self._receiverBlock)}"
 
-    def getReceiverBlock(self):
+    def getReceiverBlock(self) -> ReceiverBlock:
         return self._receiverBlock
 
-    def applyConfigDict(self, configDict):
+    def applyConfigDict(self, configDict) -> None:
         self._scanWindowsById = {}
 
         for swData in configDict['scanWindows']:
-            sw = ScanWindow.fromJson(swData)
+            sw = ScanWindow.fromJson(swData, self._receiverBlock.getSampleRates())
             self._scanWindowsById[sw.id] = sw
 
-    def getScanWindow(self, swId):
+    def getScanWindow(self, swId) -> ScanWindow:
         return self._scanWindowsById[swId]
 
 
@@ -168,6 +298,9 @@ class ReceiverConfig():
         if self.receiverArgs is None:
             self.receiverArgs = {}
 
+        # Soapy Params
+        self._rxChannel = 0
+
         self.rxType = lookupRxType(rxTypeStr)
         if self.rxType == ReceiverType.UNKNOWN:
             raise Exception(f"Unknown Receiver Type: '{rxTypeStr}'")
@@ -175,11 +308,12 @@ class ReceiverConfig():
         if not self._rxBlockCls:
             raise Exception(f"Block not found for Receiver Type: '{rxTypeStr}'")
 
+        if self.rxType == Receiver_SOAPY:
+            if 'driver' not in self.receiverArgs:
+                raise Exception("Must provide 'driver' setting for SOAPY receiver type")
+
         self.scanWindowConfigs: List[ScanWindowConfig] = []
         self._scanWindowsById: Dict[Any, ScanWindow] = {}
-
-    def getSampleRates(self):
-        return Receiver_RTLSDR.SAMPLE_RATES
 
 
 def runAsProcess(pipe, receiverConfig: ReceiverConfig, audioShmBuffer: shared_memory.SharedMemory, headIdx: Any, tailIdx: Any):
@@ -192,6 +326,10 @@ def _runAsProcess(pipe, receiverConfig: ReceiverConfig, audioShmBuffer: shared_m
 
     rx = Receiver(receiverConfig.id, receiverConfig.rxType, receiverConfig.receiverArgs)
     rxBlock = rx.getReceiverBlock()
+
+    # On startup, send back our Receiver SampleRates
+    pipe.send([{'type': 'sample_rates', 'data': rxBlock.getSampleRates()}])
+
 
     # blockAudioSink = audio.sink(AUDIO_SAMPLERATE, '', True)
     audioSender = AudioSender(audioShmBuffer, headIdx, tailIdx)

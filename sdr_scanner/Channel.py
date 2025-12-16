@@ -13,16 +13,15 @@ from gnuradio import gr
 from gnuradio.fft import logpwrfft, window
 
 from .const import (
-    AUDIO_SAMPLERATE,
-    FM_QUAD_RATE,
-    BFM_QUAD_RATE,
     NOISEFLOOR_LOWPASS_A,
     RSSI_LOWPASS_TC,
     RSSI_UPDATE_FREQ_HZ,
     STATUS_UPDATE_TIME_S,
-    VOLUME_LOWPASS_ATTACK_A,
-    VOLUME_LOWPASS_DECAY_A,
+    VOLUME_LOWPASS_ATTACK_TC,
+    VOLUME_LOWPASS_DECAY_TC,
 )
+
+SQUELCH_TC = 0.0125
 
 
 class ChannelStatus(IntEnum):
@@ -239,7 +238,23 @@ class ChannelConfig():
 
 
 class Channel():
-    def __init__(self, channelId, freq_hz: int, label: str, mode: ChannelMode, audioGain_dB: float, dwellTime_s: float, squelchThreshold:float, hardwareFreq_hz, rfSampleRate, mute, solo, hold, forceActive=False):
+    def __init__(
+            self,
+            channelId,
+            freq_hz: int,
+            label: str,
+            mode: ChannelMode,
+            audioGain_dB: float,
+            dwellTime_s: float,
+            squelchThreshold:float,
+            hardwareFreq_hz,
+            rfSampleRate,
+            audioSampleRate,
+            mute,
+            solo,
+            hold,
+            forceActive=False
+        ):
 
         self.id = channelId
 
@@ -273,7 +288,8 @@ class Channel():
             self.dwellTime_s,
             self.freq_hz,
             self.hardwareFreq_hz,
-            rfSampleRate
+            rfSampleRate,
+            audioSampleRate
         ]
 
         if mode in [ChannelMode.FM, ChannelMode.NFM]:
@@ -319,7 +335,7 @@ class Channel():
         self.setForceActive(self._forceActive)
 
     @classmethod
-    def fromJson(cls, data: Dict[str, Any], scanWindowHardwareFreq_hz: int, scanWindowRFSampleRate: int) -> "Channel":
+    def fromJson(cls, data: Dict[str, Any], scanWindowHardwareFreq_hz: int, scanWindowRFSampleRate: int, scanWindowAudioSampleRate: int) -> "Channel":
         mode = ChannelConfig.modeStrLookup(data['mode'])
         if mode is None:
             raise Exception(f"Unknown Channel Mode Type: ({data['mode']})")
@@ -334,6 +350,7 @@ class Channel():
             squelchThreshold=data['squelchThreshold'],
             hardwareFreq_hz=scanWindowHardwareFreq_hz,
             rfSampleRate=scanWindowRFSampleRate,
+            audioSampleRate=scanWindowAudioSampleRate,
             mute=data['mute'],
             solo=data['solo'],
             hold=data['hold'],
@@ -379,6 +396,7 @@ class ChannelBlock_Base(gr.hier_block2):
             squelchThreshold: float,
             audioGain_dB: float,
             dwellTime_s: float,
+            audioSampleRate: int,
             ):
         gr.hier_block2.__init__(
             self, "_Channel",
@@ -395,6 +413,7 @@ class ChannelBlock_Base(gr.hier_block2):
         self.squelchThreshold = squelchThreshold
         self.audioGainFactor = dbToRatio(audioGain_dB) * self.FIXED_AUDIO_GAIN_FACTOR
         self._dwellTime_s = dwellTime_s
+        self._audioSampleRate = audioSampleRate
 
         self._active = False
         self._lastActive = 0.0
@@ -416,12 +435,14 @@ class ChannelBlock_Base(gr.hier_block2):
         ###
         # Volume Blocks
 
-        self.blockVolume = MagToPowerLowPass_EmbeddedPythonBlock(self.updateVolume, VOLUME_LOWPASS_ATTACK_A, VOLUME_LOWPASS_DECAY_A)
+        volumeLowpassAttackA = (1 / (self._audioSampleRate * VOLUME_LOWPASS_ATTACK_TC))
+        volumeLowpassDecayA = (1 / (self._audioSampleRate * VOLUME_LOWPASS_DECAY_TC))
+        self.blockVolume = MagToPowerLowPass_EmbeddedPythonBlock(self.updateVolume, volumeLowpassAttackA, volumeLowpassDecayA)
 
     def _connectVolume(self, sourceBlock, sourceBlockPort):
         """
         sourceBlock
-            The output audio block, must be at AUDIO_SAMPLERATE
+            The output audio block
         sourceBlockPort
             The sourceBlock port to connect from
         """
@@ -479,6 +500,7 @@ class ChannelBlock_FM(ChannelBlock_Base):
             channelFreq_hz: int,
             hardwareFreq_hz: int,
             rfSampleRate: int,
+            audioSampleRate: int,
             deviation_hz: int,
         ):
         super().__init__(
@@ -490,22 +512,40 @@ class ChannelBlock_FM(ChannelBlock_Base):
             squelchThreshold,
             audioGain_dB,
             dwellTime_s,
+            audioSampleRate,
         )
 
         self._deviation_hz = deviation_hz
-        if self._deviation_hz > AUDIO_SAMPLERATE:
-            self.fmQuadRate = BFM_QUAD_RATE
-        else:
-            self.fmQuadRate = FM_QUAD_RATE
+        self.rfSampleRate = rfSampleRate
+
+        ###
+        # Find an FM Quad rate that we can divide down to
+
+        self.fmQuadRate = self._audioSampleRate
+        if self._deviation_hz > self._audioSampleRate:
+            # BFM - need much wider bandwidth
+            fmQuadMultiple = None
+            n = math.ceil(200_000 / self._audioSampleRate)
+            while fmQuadMultiple is None:
+                if self.rfSampleRate % (self._audioSampleRate * n) == 0:
+                    fmQuadMultiple = n
+                if self.rfSampleRate < self._audioSampleRate * n:
+                    raise Exception("Unable to find FM Quad Rate for BFM")
+                n += 1
+            self.fmQuadRate = self._audioSampleRate * fmQuadMultiple
 
         freqOffset_Hz = channelFreq_hz - hardwareFreq_hz
-        self.rfSampleRate = rfSampleRate
 
         if self.rfSampleRate % self.fmQuadRate != 0:
             raise Exception(f"RF Sample Rate ({self.rfSampleRate}) is not a multiple of FM Quad Rate ({self.fmQuadRate})")
 
         inputDecimation = self.rfSampleRate // self.fmQuadRate
         intermediateDecimation, xlatDecimation = _filterDec(inputDecimation)
+
+
+        print("------")
+        print(f"intermediateDecimation {intermediateDecimation}, xlatDecimation: {xlatDecimation}")
+        print(f"FM Channel: rfSampleRate: {rfSampleRate} fmQuadRate: {self.fmQuadRate} _audioSampleRate: {self._audioSampleRate}")
 
         ##################################################
         # Blocks
@@ -544,12 +584,12 @@ class ChannelBlock_FM(ChannelBlock_Base):
 
         self.blockAnalogPowerSquelch = analog.pwr_squelch_cc(
             self.squelchThreshold,
-            0.005,
+            1 / (self.fmQuadRate * SQUELCH_TC),
             0,
             False
         )
         self.blockAnalogNbfmRx = analog.nbfm_rx(
-            audio_rate=AUDIO_SAMPLERATE,
+            audio_rate=self._audioSampleRate,
             quad_rate=self.fmQuadRate,
             tau=75e-6,
             max_dev=self._deviation_hz,
@@ -562,7 +602,7 @@ class ChannelBlock_FM(ChannelBlock_Base):
             1,
             firdes.band_pass(
                 1,
-                AUDIO_SAMPLERATE,
+                self._audioSampleRate,
                 200,
                 3500,
                 100,
@@ -680,6 +720,7 @@ class ChannelBlock_AM(ChannelBlock_Base):
             channelFreq_hz: int,
             hardwareFreq_hz: int,
             rfSampleRate: int,
+            audioSampleRate: int,
         ):
         super().__init__(
             channelId,
@@ -690,15 +731,16 @@ class ChannelBlock_AM(ChannelBlock_Base):
             squelchThreshold,
             audioGain_dB,
             dwellTime_s,
+            audioSampleRate,
         )
 
         freqOffset_Hz = channelFreq_hz - hardwareFreq_hz
         self.rfSampleRate = rfSampleRate
 
-        if self.rfSampleRate % AUDIO_SAMPLERATE != 0:
-            raise Exception(f"RF Sample Rate ({self.rfSampleRate}) is not a multiple of Audio Sample Rate ({AUDIO_SAMPLERATE})")
+        if self.rfSampleRate % self._audioSampleRate != 0:
+            raise Exception(f"RF Sample Rate ({self.rfSampleRate}) is not a multiple of Audio Sample Rate ({self._audioSampleRate})")
 
-        inputDecimation = self.rfSampleRate // AUDIO_SAMPLERATE
+        inputDecimation = self.rfSampleRate // self._audioSampleRate
         intermediateDecimation, xlatDecimation = _filterDec(inputDecimation)
 
         ##################################################
@@ -726,7 +768,7 @@ class ChannelBlock_AM(ChannelBlock_Base):
 
         else:
             self.blockFreqXlatingFilter = gr_filter.freq_xlating_fir_filter_ccc(
-                int(self.rfSampleRate/AUDIO_SAMPLERATE),
+                int(self.rfSampleRate/self._audioSampleRate),
                 firdes.low_pass(1.0, self.rfSampleRate, 4000, 2000),
                 freqOffset_Hz,
                 self.rfSampleRate
@@ -737,12 +779,12 @@ class ChannelBlock_AM(ChannelBlock_Base):
 
         self.blockAnalogPowerSquelch = analog.pwr_squelch_cc(
             self.squelchThreshold,
-            0.005,
+            1 / (self._audioSampleRate * SQUELCH_TC),
             0,
             False
         )
 
-        self.blockAnalogAgc = analog.feedforward_agc_cc(int(AUDIO_SAMPLERATE * 0.2), 0.5)
+        self.blockAnalogAgc = analog.feedforward_agc_cc(int(self._audioSampleRate * 0.2), 0.5)
 
         self.blockAnalogAMDemod = blocks.complex_to_mag(1)
 
@@ -753,7 +795,7 @@ class ChannelBlock_AM(ChannelBlock_Base):
             1,
             firdes.band_pass(
                 1,
-                AUDIO_SAMPLERATE,
+                self._audioSampleRate,
                 200,
                 3500,
                 100,
@@ -767,8 +809,8 @@ class ChannelBlock_AM(ChannelBlock_Base):
         # RSSI
 
         self.blockRssiComplexToMag2 = blocks.complex_to_mag_squared(1)
-        self.blockRssiLowPassFilter = gr_filter.single_pole_iir_filter_ff( (1 / (AUDIO_SAMPLERATE * RSSI_LOWPASS_TC)), 1)
-        self.blockRssiDecimate = blocks.keep_one_in_n(gr.sizeof_float*1, (AUDIO_SAMPLERATE // RSSI_UPDATE_FREQ_HZ) )
+        self.blockRssiLowPassFilter = gr_filter.single_pole_iir_filter_ff( (1 / (self._audioSampleRate * RSSI_LOWPASS_TC)), 1)
+        self.blockRssiDecimate = blocks.keep_one_in_n(gr.sizeof_float*1, (self._audioSampleRate // RSSI_UPDATE_FREQ_HZ) )
         self.blockRssi = Mag2ToPower_EmbeddedPythonBlock(self.updateRSSI)
 
 
@@ -918,6 +960,7 @@ class ChannelBlock_EAS(ChannelBlock_Base):
             channelFreq_hz: int,
             hardwareFreq_hz: int,
             rfSampleRate: int,
+            audioSampleRate: int,
             deviation_hz: int,
             alertTones: List[int],
         ):
@@ -930,6 +973,7 @@ class ChannelBlock_EAS(ChannelBlock_Base):
             squelchThreshold,
             audioGain_dB,
             dwellTime_s,
+            audioSampleRate,
         )
 
         self._triggerCount = 0
@@ -955,6 +999,7 @@ class ChannelBlock_EAS(ChannelBlock_Base):
             channelFreq_hz,
             hardwareFreq_hz,
             rfSampleRate,
+            audioSampleRate,
             deviation_hz,
         )
 
@@ -964,7 +1009,7 @@ class ChannelBlock_EAS(ChannelBlock_Base):
         FFT_SIZE = 1024
 
         self.blockLogPowerFFT = logpwrfft.logpwrfft_f(
-            sample_rate=AUDIO_SAMPLERATE,
+            sample_rate=audioSampleRate,
             fft_size=FFT_SIZE,
             ref_scale=1,
             frame_rate=30,
@@ -974,7 +1019,7 @@ class ChannelBlock_EAS(ChannelBlock_Base):
         )
 
         def _binNum(freq):
-            return round(freq * FFT_SIZE / AUDIO_SAMPLERATE)
+            return round(freq * FFT_SIZE / audioSampleRate)
 
         self.blockToneDetect = ToneDetect_EmbeddedPythonBlock(
             activeCb=self.activeCb,
@@ -1081,6 +1126,7 @@ class ChannelBlock_SSB(ChannelBlock_Base):
             channelFreq_hz: int,
             hardwareFreq_hz: int,
             rfSampleRate: int,
+            audioSampleRate: int,
             upperNotLowerSideband: bool,
         ):
         super().__init__(
@@ -1092,14 +1138,40 @@ class ChannelBlock_SSB(ChannelBlock_Base):
             squelchThreshold,
             audioGain_dB,
             dwellTime_s,
+            audioSampleRate,
         )
 
         self.upperNotLowerSideband = upperNotLowerSideband
 
         self.rfSampleRate = rfSampleRate
 
-        ifFreq = FM_QUAD_RATE
-        ifSampleRate = BFM_QUAD_RATE
+
+
+        ###
+        # Find an IF Freq that we can divide down to, and a suitable ifSampling Rate 
+
+        ifMultiple = None
+        ifSamplingRateMultiple = None
+
+        n = math.ceil(20_000 / self._audioSampleRate)
+        while ifMultiple is None:
+            if self.rfSampleRate % (self._audioSampleRate * n) == 0:
+                # Can we find an ifSamplingRate
+                for nn in [3, 4, 5]:
+                    if self.rfSampleRate % (self._audioSampleRate * n * nn) == 0:
+                        ifMultiple = n
+                        ifSamplingRateMultiple = n * nn
+            if self.rfSampleRate < self._audioSampleRate * n:
+                break
+            n += 1
+        if ifMultiple is None or ifSamplingRateMultiple is None:
+            raise Exception("Unable to find Suitable IF Frequency")
+        
+        ifFreq = self._audioSampleRate * ifMultiple
+        ifSampleRate = self._audioSampleRate * ifSamplingRateMultiple
+
+        print(f"ifFreq: {ifFreq}  ifSampleRate: {ifSampleRate}")
+
         freqOffset_Hz = channelFreq_hz - hardwareFreq_hz - ifFreq
 
         if self.upperNotLowerSideband:
@@ -1152,7 +1224,7 @@ class ChannelBlock_SSB(ChannelBlock_Base):
 
         self.blockAnalogPowerSquelch = analog.pwr_squelch_cc(
             self.squelchThreshold,
-            0.005,
+            1 / (ifSampleRate * SQUELCH_TC),
             0,
             False
         )
@@ -1176,7 +1248,7 @@ class ChannelBlock_SSB(ChannelBlock_Base):
         # Audio
 
         self.blockAudioFilter = gr_filter.fft_filter_fff(
-            int(ifSampleRate / AUDIO_SAMPLERATE),
+            int(ifSampleRate / self._audioSampleRate),
             firdes.low_pass(
                 1,
                 ifSampleRate,

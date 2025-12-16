@@ -15,7 +15,8 @@ Current Status
 
 This is in a working but early stage. 
 
-Currently only support for RTL-SDR radios is enabled.
+This was designed around RTL-SDR radios, but minimal support is provided for others which can be accessed
+through Soapy. (See notes in config section below.)
 
 
 Architecture Overview
@@ -82,8 +83,11 @@ The 'channel_defaults' allows overriding the default values for:
 - squelchThreshold
 
 
+Receivers
+---------
+
 Multiple Receivers
-------------------
+^^^^^^^^^^^^^^^^^^
 
 Multiple Receivers can be enabled in the config.
 
@@ -96,6 +100,68 @@ For RTL-SDR, Unique serial numbers must be assigned to each (see 'rtl_eeprom').
         deviceArg: serial=00000001
       - type: RTL-SDR
         deviceArg: serial=00000002
+
+
+Other Receiver Types
+^^^^^^^^^^^^^^^^^^^^
+
+Minimal experimental support is provided for receivers which Soapy supports::
+
+      - type: SOAPY
+        driver: airspy
+        gain: 32
+
+      - type: SOAPY
+        driver: airspy
+        gains:
+          LNA: 10
+          MIX: 10
+          VGA: 10
+
+For individual gain settings, use the 'gains' key to set the specific gains. Details on these can be provied by SoapySDRUtil::
+
+    $ SoapySDRUtil --probe="driver=airspy"
+    ...
+      Full gain range: [0, 45] dB
+        LNA gain range: [0, 15] dB
+        MIX gain range: [0, 15] dB
+        VGA gain range: [0, 15] dB
+    ...
+
+
+However, expect some issues. Not all radios may work with the current processing pipelines.
+
+Some radios, for example RTL-SDR, offer sample rates which decimate down cleanly to common audio frequencies.
+
+For others, such as my Airspy, resampling of the data stream is needed somewhere in the pipeline. Currently this
+is implemented in the final Audio output from the Receiver block, where the Receiver itself runs at a different audio
+rate and is resampled to the Global audio rate as the last step. This resampling and higher audio rates will introduce
+performance impacts.
+
+Another issue with sampling rates is that the internal signal processing chain uses one or multiple intermediate
+rates through filtering and decimation. Naive logic is in place to determine viable options for these internal rates, but
+if it is unable to find an acceptable solution, it will crash at startup. Even if it does find a solution, it may not be
+optimal from a processing perspective.
+
+For example, in my setup the Airspy uses much more CPU for processing than the RTL-SDRs, as the intermediate rates it uses internally
+are much higher.
+
+Mixing Receiver Types
+^^^^^^^^^^^^^^^^^^^^^
+
+Using multiple receiver types simultaneously is not recommended, especially starting out, but not inherently prohibited.
+Careful testing may be needed to get a performant configuration.
+
+For example, since the squelch is set relative to the receiver's dBFS, receivers with different overall gains will have
+a different dBFS reading for the same absolute power input to it. An initial solution is to adjust the gain of one of
+the receivers so that it has similar RSSI readings as a reference one.
+
+The Scan Windows that are built share the same Channel list between all of the Receivers - as such, they must
+be compatible for the receiver with the lowest bandwidth. This means that any receiver with a higher bandwidth is
+not achieving a wider Scan Window, but still suffers from the increased processing needs. As an example, using the
+RTL-SDR (2,048,000 samp/s) and the Airspy (2,500,000 samp/s) simultaneously, the Airspy is using ~20% more samples to
+monitor the same window.
+
 
 Scanner Settings
 ----------------
@@ -318,8 +384,8 @@ Future Work
 
 My non-committal TODO list:
 
-- **General GUI Enhancement**
-- **Additional Receiver Models**
+- Deprecate the GUI (wxPython) for a web-based interface.
+- Improved support around using multiple receivers at once (for example, each receier tracks it's own noise floor independently)
 - **Priority Channel Support** - Higher priority Channels preempt others by muting them or lowering
   their volume.
 - **Automatic Adaptive Squelch**
@@ -331,8 +397,6 @@ My non-committal TODO list:
 
 Stretch Goals include:
 
-- Support for remote monitoring - especially for local but perhaps across internet. A web interface
-  would be ideal.
 - Support for remote receivers
 - Activity Recording - Record and plot historical active periods and perhaps record audio for playback.
 

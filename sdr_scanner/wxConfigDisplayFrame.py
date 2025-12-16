@@ -245,10 +245,11 @@ class ConfigDisplayFrame(wx.Frame):
         self.dataModel = ConfigListModel([])
         self.dvlc.AssociateModel(self.dataModel)
 
-        self.resetConfig()
-
         self.sizer.Add(self.dvlc, 1, wx.EXPAND | wx.ALL, 10)
         self.panel.SetSizer(self.sizer)
+
+        self.resetConfig()
+
         self.Layout()
 
     def onSelectChannel(self, event):
@@ -269,6 +270,7 @@ class ConfigDisplayFrame(wx.Frame):
 
         self.dataModel.resetConfig(channelData)
         self.Layout()
+        self.Refresh()
 
     def SetChannelStatus(self, channelId, status: ChannelStatus):
         self.dataModel.SetChannelStatus(channelId, status)

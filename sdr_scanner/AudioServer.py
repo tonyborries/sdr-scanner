@@ -614,7 +614,7 @@ class AudioServerOutput_Websocket(AudioServerOutput_Base):
                 break
             except OSError as e:
                 print(f"bind failed: {e}")
-                if self._stop:
+                if stopEvt.is_set():
                     break
                 print("retrying bind in 1 second...")
                 time.sleep(1)
