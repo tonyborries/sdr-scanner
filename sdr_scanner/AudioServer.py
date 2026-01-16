@@ -91,7 +91,7 @@ class AudioServerConfig(object):
         elif configDict['type'].lower() == 'udp':
             return AudioServerOutput_UDP(configDict['serverIp'], configDict['serverPort'])
         elif configDict['type'].lower() == 'icecast':
-            return AudioServerOutput_Icecast(configDict['url'], configDict['password'])
+            return AudioServerOutput_Icecast(configDict['url'], configDict['username'], configDict['password'])
         elif configDict['type'].lower() == 'websocket':
             return AudioServerOutput_Websocket(configDict['host'], configDict['port'])
         raise Exception(f"Unknown Audio Output Type: {configDict}")
@@ -286,6 +286,10 @@ class AudioServerOutput_Local(AudioServerOutput_Base):
     FRAMES_PER_BUFFER = 1000
 
     def __init__(self) -> None:
+
+        if not LOCAL_AUDIO_SUPPORT:
+            raise Exception("Missing pyAudio, Local Audio support not available.")
+
         self._outputBuffer: collections.deque = collections.deque(maxlen=self.FRAMES_PER_BUFFER * 4)
 
         self._pyaudio: Optional[pyaudio.PyAudio] = None
@@ -428,10 +432,11 @@ class AudioServerOutput_Icecast(AudioServerOutput_Base):
     SAMPLES_PER_FRAME = AUDIO_SAMPLERATE // 4
     BUFFER_LEN = SAMPLES_PER_FRAME * 3
 
-    def __init__(self, url, password) -> None:
+    def __init__(self, url, username, password) -> None:
         self._outputBuffer: collections.deque = collections.deque(maxlen=self.BUFFER_LEN)
 
         self._url = url
+        self._username = username
         self._password = password
         self._mp3Bitrate = 48000
 
@@ -493,7 +498,7 @@ class AudioServerOutput_Icecast(AudioServerOutput_Base):
                 resp = session.put(
                     self._url,
                     data=self._streamDataGen(stopEvt),
-                    auth=("source", self._password),
+                    auth=(self._username, self._password),
                     headers={"Content-Type": "audio/mpeg"},
                     stream=True,
                     timeout=10,

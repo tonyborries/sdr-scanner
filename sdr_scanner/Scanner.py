@@ -41,6 +41,8 @@ class Scanner():
 
         self.maxChannelsPerWindow = 16
 
+        self.audioServerProcess: Optional[Process] = None
+
         self._stopFlag = False
         self._configDirty = False
         self._nextMaintenanceTime = 0.0
@@ -399,9 +401,9 @@ class Scanner():
         # Launch Audio Server
 
         self.audioServerConfig = AudioServerConfig(numInputStreams=len(self.receiverConfigs), outputConfigDicts=self.audioOutputConfigDicts)
-        audioServerProcess = self.audioServerConfig.getProcess()
-        audioServerProcess.daemon = True
-        audioServerProcess.start()
+        self.audioServerProcess = self.audioServerConfig.getProcess()
+        self.audioServerProcess.daemon = True
+        self.audioServerProcess.start()
 
         while True:
 
@@ -418,7 +420,7 @@ class Scanner():
                 self._stopFlag = True
 
             if self._stopFlag:
-                audioServerProcess.kill()
+                self.audioServerProcess.kill()
                 self.audioServerConfig.cleanup()
                 return
 
@@ -509,6 +511,10 @@ class Scanner():
                     })
 
             time.sleep(0.001)
+
+            if not self.audioServerProcess.is_alive():
+                print("ERROR: AudioServer Not Alive")
+                self._stopFlag = True
 
             if self._stopFlag or self._configDirty:
                 for rxConfig, pipe, process in self._receiverProcesses:
