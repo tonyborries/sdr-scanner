@@ -18,6 +18,9 @@ This is in a working but early stage.
 This was designed around RTL-SDR radios, but minimal support is provided for others which can be accessed
 through Soapy. (See notes in config section below.)
 
+I'm currently migrating away from the wxPython interface to a web interface, hosted in Docker. This is still
+a work in progress.
+
 
 Architecture Overview
 =====================
@@ -241,6 +244,8 @@ Docker
 ------
 
 Minimal docker support is included for those who want it, limited to running the CLI app (no GUI support).
+
+A work-in-progress web interface is also included.
 
 Blacklist kernel modules on host and reboot (or rmmod each)::
 

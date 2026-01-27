@@ -3,10 +3,22 @@ services:
     build: .
     ports:
       - "8123:8123"
+      - "8080:8080"
     privileged: true
     volumes:
       - .:/app
       - /dev/usb:/dev/usb
       - /dev/bus/usb:/dev/bus/usb
     restart: no
-    command: python3 cli_scan.py -c sdrscan.yaml
+    command: python3 cli_scan.py -c sdrscan.yaml --controlWsHost 0.0.0.0 --controlWsPort 8080
+
+  sdr_web:
+    build: web/
+    ports:
+      - "5173:5173"
+    environment:
+      VITE_CONTROL_WS_URL: "ws://0.0.0.0:8080/control_ws"
+    volumes:
+      - ./web/web_scanner/:/app
+    restart: no
+    command: npm run dev -- --host 0.0.0.0

@@ -1,0 +1,15 @@
+.activeChannel {
+    text-align: left;
+}
+
+div.activeChannel {
+  border: 4px solid black;
+  border-style: solid;
+  margin-bottom: 5px;
+}
+
+.activeChannel .channelLabel {
+    font-size: large;
+    font-weight: bold;
+}
+

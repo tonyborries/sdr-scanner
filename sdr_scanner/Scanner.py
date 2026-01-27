@@ -1,6 +1,7 @@
 from multiprocessing import Pipe, Process
 import queue
 import sys
+import threading
 import time
 from typing import Any, Dict, List, Optional
 import yaml
@@ -15,7 +16,11 @@ from .ScanWindow import ScanWindowConfig
 class Scanner():
     MAINTENANCE_LOOP_TIME_S = 60
 
-    def __init__(self) -> None:
+    def __init__(self, controlWebsocketHost: Optional[str] = None, controlWebsocketPort: Optional[int] = None) -> None:
+        """
+        controlWebsocketHost / controlWebsocketPort
+            If both are specified, enable the Control Websocket
+        """
 
         self.channelConfigs: List[ChannelConfig] = []
         self._channelConfigByIdCache = {}
@@ -27,6 +32,11 @@ class Scanner():
         self._receiverSampleRates: Dict[Any, List[int]] = {}
 
         self._defaultChannelConfig = ChannelConfig(0, 'DEFAULT')
+
+        self._controlWsHost = controlWebsocketHost
+        self._controlWsPort = controlWebsocketPort
+        self._controlWsStopEvent: Optional[threading.Event] = None
+        self._controlWsThread: Optional[threading.Thread] = None
 
         self._receiverCurrentScanWindow = {}
         self._windowLastScan = {}  # {windowId: time.time()}
@@ -48,11 +58,11 @@ class Scanner():
         self._nextMaintenanceTime = 0.0
 
     @classmethod
-    def fromConfigFile(cls, configFilePath: str) -> "Scanner":
+    def fromConfigFile(cls, configFilePath: str, controlWebsocketHost: Optional[str] = None, controlWebsocketPort: Optional[int] = None) -> "Scanner":
         with open(configFilePath, 'r') as F_CONFIG:
             configDict = yaml.safe_load(F_CONFIG)
 
-            scanner = cls()
+            scanner = cls(controlWebsocketHost, controlWebsocketPort)
 
             ###
             # Scanner
@@ -119,6 +129,14 @@ class Scanner():
             oq.put(msg)
         for cb in self._processQueueCallbacks:
             cb()
+
+    def getJsonConfigMsg(self):
+        return {
+            'type': 'config',
+            'data': {
+                'scanWindows': [swc.getJson() for swc in self.scanWindowConfigs],
+            },
+        }
 
     def _checkInputQueues(self):
         """
@@ -405,6 +423,19 @@ class Scanner():
         self.audioServerProcess.daemon = True
         self.audioServerProcess.start()
 
+        ###
+        # Start Control Websocket
+
+        if self._controlWsHost and self._controlWsPort:
+            from .ControlWeb import controlWebsocketRun
+
+            self._controlWsStopEvent = threading.Event()
+            self._controlWsThread = threading.Thread(
+                target=controlWebsocketRun,
+                daemon=True,
+                args=(self, self._controlWsHost, self._controlWsPort, self._controlWsStopEvent))
+            self._controlWsThread.start()
+
         while True:
 
             try:
@@ -422,6 +453,8 @@ class Scanner():
             if self._stopFlag:
                 self.audioServerProcess.kill()
                 self.audioServerConfig.cleanup()
+                if self._controlWsStopEvent is not None:
+                    self._controlWsStopEvent.set()
                 return
 
     def _runReceivers(self):

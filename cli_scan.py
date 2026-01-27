@@ -13,6 +13,8 @@ def main():
     parser = argparse.ArgumentParser(prog='wxSDRScanner')
 
     parser.add_argument('-c', '--config', default='sdrscan.yaml')
+    parser.add_argument('--controlWsHost', default=None, help="If controlWsHost and controlWsPort are specified, enable the Control Websocket")
+    parser.add_argument('--controlWsPort', default=None, type=int, help="If controlWsHost and controlWsPort are specified, enable the Control Websocket")
 
     args = parser.parse_args()
 
@@ -22,7 +24,7 @@ def main():
     scannerToUiQueue = queue.Queue()
     #uiToScannerQueue = queue.Queue()
 
-    scanner = Scanner.fromConfigFile(args.config)
+    scanner = Scanner.fromConfigFile(args.config, args.controlWsHost, args.controlWsPort)
 
 
     ###
