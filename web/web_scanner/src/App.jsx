@@ -5,7 +5,7 @@ import scannerConfigReducer from './scannerConfigReducer.js'
 import {ChannelConfigList, ActiveChannelList} from './Channel.jsx'
 
 import './App.css'
-import 'bootstrap/dist/css/bootstrap.min.css';
+import styles from './App.module.css';
 
 
 function App() {
@@ -55,17 +55,15 @@ function App() {
 
   return (
     <>
-      <h1>SDR WebScanner</h1>
+      <h1>Web SDRScanner</h1>
       <span>The Control WebSocket is currently <b>{connectionStatus}</b></span>
 
-      <div className="container">
-        <div className="row">
-          <div className="col-md-6">
-            <ActiveChannelList scannerConfigData={scannerConfigData}/>
-          </div>
-          <div className="col-md-6">
-            <ChannelConfigList scannerConfigData={scannerConfigData}/>
-          </div>
+      <div className={styles.channelsContainer}>
+        <div className="">
+          <ActiveChannelList scannerConfigData={scannerConfigData}/>
+        </div>
+        <div className={styles.channelsConfigList}>
+          <ChannelConfigList scannerConfigData={scannerConfigData}/>
         </div>
       </div>
 

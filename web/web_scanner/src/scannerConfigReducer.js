@@ -18,7 +18,7 @@ export default function scannerConfigReducer(prevScannerConfigData, action) {
         case 'ChannelStatus':
             {
                 let newScannerConfigData = {...prevScannerConfigData};
-                if (newScannerConfigData) {
+                if (newScannerConfigData && newScannerConfigData.channelConfigs) {
                     newScannerConfigData.channelConfigs = newScannerConfigData.channelConfigs.map(channelConfig => {
                         if (channelConfig.id === action.data.id) {
                             return { ...channelConfig, statusData: action.data };

@@ -3,9 +3,28 @@
 }
 
 div.activeChannel {
-  border: 4px solid black;
-  border-style: solid;
-  margin-bottom: 5px;
+    border: 4px solid black;
+    border-style: solid;
+    margin-bottom: 5px;
+
+}
+
+div.activeChannel .topLineContainer {
+    display: flex;
+    justify-content: left;
+    align-items: left;
+
+    margin: 3px;
+}
+
+.activeChannel .channelLabelContainer {
+    width: 200px;
+    margin: 3px;
+}
+
+.activeChannel .channelRssiContainer {
+    margin: 5px;
+    width: 160px;
 }
 
 .activeChannel .channelLabel {
@@ -13,3 +32,52 @@ div.activeChannel {
     font-weight: bold;
 }
 
+.statusContainer {
+    display: flex;
+    justify-content: left;
+    align-items: center;
+    padding: 3px;
+    gap: 5px;
+}
+
+.statusBox  {
+    width: 30px;
+    height: 30px;
+    
+    /* Add a background color and border for visibility */
+    background-color: #f0f0f0;
+    border: 3px solid #333;
+
+    /* Use Flexbox for centering content */
+    display: flex;
+    justify-content: center; /* Centers horizontally */
+    align-items: center; /* Centers vertically */
+    
+    font-size: large;
+    font-weight: bold;
+    text-align: center;
+    overflow: hidden;
+}
+
+p.statusBox {
+    margin: 3px;
+    padding: 0;
+    border: 0;
+    box-sizing: border-box;
+}
+
+.holdActive {
+    background-color: #f1c40f;
+}
+
+.soloActive {
+    background-color: #f1c40f;
+}
+
+.muteActive {
+    background-color: #e74c3c;
+}
+
+.disableActive {
+    background-color: #e74c3c;
+}

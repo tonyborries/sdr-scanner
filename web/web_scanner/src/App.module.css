@@ -1,0 +1,12 @@
+.channelsContainer {
+    display: flex;
+    justify-content: center;
+    align-items: top;
+
+    margin: 3px;
+    padding: 3px;
+}
+
+div.channelsConfigList {
+
+}
