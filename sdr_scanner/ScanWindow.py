@@ -16,7 +16,7 @@ class ScanWindowConfig():
             The width of the ScanWindow in Hz. Note that receivers need to select a samplerate that is
             sufficient to cover this when instantiating their ScanWindow Objects.
         """
-        self.id = uuid.uuid4()
+        self.id = str(uuid.uuid4())
 
         self.hardwareFreq_hz = hardwareFreq_hz
         self.rfBandwidth = rfBandwidth

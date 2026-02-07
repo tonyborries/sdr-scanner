@@ -1,6 +1,10 @@
 import { useEffect, useState, useRef } from 'react'
 import styles from './Channel.module.css';
 
+///////////////////////////////////////////////////////////////////
+//                                                               //
+//                       Shared Functions                        //
+
 const getStatusString = (status) =>{
 
     switch (status) {
@@ -35,62 +39,220 @@ const getChannelBackgroundColor = (currentStatus) => {
   }
 };
 
+function ChannelConfigControls({channelConfig, isVisible, controlWsSendJsonMessage}) {
 
-///////////////////////////////////////////////////////////////////////
-//                                                                   //
-//                        Channel Config List                        //
+    const handleHoldClick = (event) => {
+        controlWsSendJsonMessage({
+            "type": "ChannelHold",
+            "data": {
+                "id": channelConfig.id,
+                "hold": channelConfig.hold != true
+            }
+        });
+        event.stopPropagation();
+    };
 
-function ChannelConfig({channelConfig}) {
+    const handleSoloClick = (event) => {
+        controlWsSendJsonMessage({
+            "type": "ChannelSolo",
+            "data": {
+                "id": channelConfig.id,
+                "solo": channelConfig.solo != true
+            }
+        });
+        event.stopPropagation();
+    };
 
-  return (
-    <>
-    <tr 
-      style={{
-        backgroundColor: getChannelBackgroundColor(channelConfig.statusData ? channelConfig.statusData.status : 0),
-      }}
-    >
-      <td>{channelConfig.label}</td>
-      <td>{(channelConfig.freq_hz / 1_000_000).toFixed(3)}</td>
-      <td>{getStatusString(channelConfig.statusData ? channelConfig.statusData.status : 0)}</td>
-      <td>{JSON.stringify(channelConfig.mute)}</td>
-    </tr>
+    const handleMuteClick = (event) => {
+        controlWsSendJsonMessage({
+            "type": "ChannelMute",
+            "data": {
+                "id": channelConfig.id,
+                "mute": channelConfig.mute != true
+            }
+        });
+        event.stopPropagation();
+    };
+
+    const handleDisableClick = (event) => {
+        controlWsSendJsonMessage({
+            "type": "ChannelEnable",
+            "data": {
+                "id": channelConfig.id,
+                "enabled": channelConfig.enabled != true
+            }
+        });
+        event.stopPropagation();
+    };
+
+    const handleDisable1HourClick = (event) => {
+        controlWsSendJsonMessage({
+            "type": "ChannelDisableUntil",
+            "data": {
+                "id": channelConfig.id,
+                "disableUntil": (Date.now() / 1000) + 3600
+            }
+        });
+        event.stopPropagation();
+    };
     
+    const handleForceActive = (event) => {
+        controlWsSendJsonMessage({
+            "type": "ChannelForceActive",
+            "data": {
+                "id": channelConfig.id,
+                "forceActive": channelConfig.forceActive != true
+            }
+        });
+        event.stopPropagation();
+    };
+
+    const handlePause = (event) => {
+        controlWsSendJsonMessage({
+            "type": "ChannelForceActive",
+            "data": {
+                "id": channelConfig.id,
+                "forceActive": false
+            }
+        });
+        event.stopPropagation();
+    };
+
+    if (! isVisible) {
+        return null;
+    }
+
+    return (
+        <>
+            <div className={styles.channelConfigControls} >
+
+                <div title="Hold Channel" onClick={handleHoldClick} className={`${styles.statusBox} ${channelConfig.hold == true ? styles.holdActive : ""}`}>
+                    <p className={`${styles.statusBox} ${channelConfig.hold == true ? styles.holdActive : ""}`}>H</p>
+                </div>
+                <div title="Solo Channel" onClick={handleSoloClick} className={`${styles.statusBox} ${channelConfig.solo == true ? styles.soloActive : ""}`}>
+                    <p className={`${styles.statusBox} ${channelConfig.solo == true ? styles.soloActive : ""}`}>S</p>
+                </div>
+                <div title="Mute Channel" onClick={handleMuteClick} className={`${styles.statusBox} ${channelConfig.mute == true ? styles.muteActive : ""}`}>
+                    <p className={`${styles.statusBox} ${channelConfig.mute == true ? styles.muteActive : ""}`}>M</p>
+                </div>
+                <div title="Disable Channel" onClick={handleDisableClick} className={`${styles.statusBox} ${channelConfig.enabled != true ? styles.disableActive : ""}`}>
+                    <p className={`${styles.statusBox} ${channelConfig.enabled != true ? styles.disableActive : ""}`}>D</p>
+                </div>
+                <div onClick={handleDisable1HourClick} className={`${styles.statusBox} ${styles.statusBoxLarge}`} >
+                    <p className={`${styles.statusBox} ${styles.statusBoxLarge}`}>Disable 1 Hr.</p>
+                </div>
+                <div title="Force Active" onClick={handleForceActive} className={`${styles.statusBox} ${channelConfig.forceActive == true ? styles.disableActive : ""}`}>
+                    <div className={styles.forceActive}></div>
+                </div>
+                <div title="Reset Active" onClick={handlePause} className={styles.statusBox}>
+                    <div className={styles.pauseIcon}></div>
+                </div>
+
+            </div>
+        </>
+    )
+
+};
+
+//                       Shared Functions                        //
+//                                                               //
+///////////////////////////////////////////////////////////////////
+
+///////////////////////////////////////////////////////////////////
+//                                                               //
+//                      Channel Config List                      //
+
+function ChannelConfigDetails({channelConfig, isVisible, controlWsSendJsonMessage}) {
+
+    if (! isVisible) {
+        return null;
+    }
+
+    return (
+        <>
+            <div className={styles.channelConfigDetails} >
+                <b>ID:</b> {channelConfig.id}
+                <br />
+                <b>Squelch:</b> {channelConfig.squelchThreshold}
+                <br />
+                <b>Dwell Time:</b> {channelConfig.dwellTime_s}
+                <br />
+                <b>Audio Gain:</b> {channelConfig.audioGain_dB}
+                <br />
+                <ChannelConfigControls channelConfig={channelConfig} isVisible={isVisible} controlWsSendJsonMessage={controlWsSendJsonMessage} />
+            </div>
+        </>
+    )
+
+};
+
+function ChannelConfig({channelConfig, controlWsSendJsonMessage}) {
+
+    const [showControls, setShowControls] = useState(false);
+
+    const handleChannelClick = () => {
+        setShowControls(! showControls);
+    }
+
+
+    return (
+        <>
+            <div onClick={handleChannelClick} className={showControls == true ? styles.showBorder : ''} style={{
+                backgroundColor: getChannelBackgroundColor(channelConfig.statusData ? channelConfig.statusData.status : 0),
+            }} >
+
+                <div className={styles.channelConfig}>
+                    <div className={styles.channelConfigLabel} >
+                        {channelConfig.label}
+                    </div>
+                    <div className={styles.channelConfigFreq} >
+                        {(channelConfig.freq_hz / 1_000_000).toFixed(3)}
+                    </div>
+                    <div className={styles.channelConfigMode} >
+                        {channelConfig.mode}
+                    </div>
+                    <div className={styles.channelConfigStatus} >
+                        {getStatusString(channelConfig.statusData ? channelConfig.statusData.status : 0)}
+                    </div>
+                </div>
+                <ChannelConfigDetails channelConfig={channelConfig} isVisible={showControls} controlWsSendJsonMessage={controlWsSendJsonMessage} />
+            </div>
+        </>
+    )
+}
+
+export function ChannelConfigList({scannerConfigData, controlWsSendJsonMessage}) {
+
+    return (
+        <>
+        <h2>Channel Configs</h2>
+
+        <div className={styles.channelConfigHeader}>
+            <div className={styles.channelConfigLabel} >
+                Name
+            </div>
+            <div className={styles.channelConfigFreq} >
+                Freq
+            </div>
+            <div className={styles.channelConfigMode} >
+                Mode
+            </div>
+            <div className={styles.channelConfigStatus} >
+                Status
+            </div>
+        </div>
+
+        {scannerConfigData && scannerConfigData.channelConfigs && scannerConfigData.channelConfigs.map(channelConfig => (
+            <ChannelConfig key={channelConfig.id} channelConfig={channelConfig} controlWsSendJsonMessage={controlWsSendJsonMessage} />
+        ))}
     </>
-  )
+    )
 }
 
 
-export function ChannelConfigList({scannerConfigData}) {
-
-  return (
-    <>
-      <h2>Channel Configs</h2>
-
-      <table>
-        <thead>
-          <tr>
-            <th>Label</th>
-            <th>Freq</th>
-            <th>Status</th>
-            <th>Mute</th>
-          </tr>
-        </thead>
-        <tbody>
-          {scannerConfigData && scannerConfigData.channelConfigs && scannerConfigData.channelConfigs.map(channelConfig => (
-            <ChannelConfig key={channelConfig.id} channelConfig={channelConfig} />
-          ))}
-        </tbody>
-      </table>
-    </>
-  )
-}
-
-
-
-//                        Channel Config List                        //
-//                                                                   //
-///////////////////////////////////////////////////////////////////////
-
+//                      Channel Config List                      //
+//                                                               //
+///////////////////////////////////////////////////////////////////
 
 ///////////////////////////////////////////////////////////////////
 //                                                               //
@@ -144,7 +306,7 @@ function RSSIBars({ rssi_dBFS, squelchThreshold_dBFS }) {
               style={{
                 ...rssiStyles.bar,
                 height: `${((index + 1) * 100) / numRssiBars}%`, // Stairs effect
-                backgroundColor: index < filledBars ? barColor : '#ccc',
+                backgroundColor: index < filledBars ? barColor : 'white',
               }}
             />
           ))}
@@ -220,31 +382,8 @@ function VolumeBar({ channelConfig }) {
   );
 };
 
-function ActiveChannelConfigDisplay({channelConfig}) {
 
-  return (
-    <>
-      <div className={styles.statusContainer}>
-        <div className={`${styles.statusBox} ${channelConfig.hold == true ? styles.holdActive : ""}`}>
-          <p className={`${styles.statusBox} ${channelConfig.hold == true ? styles.holdActive : ""}`}>H</p>
-        </div>
-        <div className={`${styles.statusBox} ${channelConfig.solo == true ? styles.soloActive : ""}`}>
-          <p className={`${styles.statusBox} ${channelConfig.solo == true ? styles.soloActive : ""}`}>S</p>
-        </div>
-        <div className={`${styles.statusBox} ${channelConfig.mute == true ? styles.muteActive : ""}`}>
-          <p className={`${styles.statusBox} ${channelConfig.mute == true ? styles.muteActive : ""}`}>M</p>
-        </div>
-        <div className={`${styles.statusBox} ${channelConfig.enabled != true ? styles.disableActive : ""}`}>
-          <p className={`${styles.statusBox} ${channelConfig.enabled != true ? styles.disableActive : ""}`}>D</p>
-        </div>
-
-      </div>
-    </>
-  );
-};
-
-
-function ActiveChannel({channelConfig}) {
+function ActiveChannel({channelConfig, controlWsSendJsonMessage}) {
 
   ///////////////////
   // Display Timeout
@@ -301,7 +440,6 @@ function ActiveChannel({channelConfig}) {
             <br />
             <span>{(channelConfig.freq_hz / 1_000_000).toFixed(3)}</span>
             <br />
-            <ActiveChannelConfigDisplay channelConfig={channelConfig} />
           </div>
           <br />
           <div className={styles.channelRssiContainer} >
@@ -312,19 +450,21 @@ function ActiveChannel({channelConfig}) {
           </div>
         </div>
 
+        <ChannelConfigControls channelConfig={channelConfig} isVisible="true" controlWsSendJsonMessage={controlWsSendJsonMessage} />
+
       </div>
     </>
   )
 }
 
-export function ActiveChannelList({scannerConfigData}) {
+export function ActiveChannelList({scannerConfigData, controlWsSendJsonMessage}) {
 
   return (
     <>
       <h2>Active Channels</h2>
 
       {scannerConfigData && scannerConfigData.channelConfigs && scannerConfigData.channelConfigs.map(channelConfig => (
-        <ActiveChannel key={channelConfig.id} channelConfig={channelConfig} />
+        <ActiveChannel key={channelConfig.id} channelConfig={channelConfig} controlWsSendJsonMessage={controlWsSendJsonMessage} />
       ))}
     </>
   )

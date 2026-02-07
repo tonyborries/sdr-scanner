@@ -100,7 +100,7 @@ def create_app(
         bridge.attach_asyncio(loop, broadcast_q)
         bridge.start()
 
-        async def broadcaster():
+        async def broadcaster() -> None:
             while True:
                 msg = await broadcast_q.get()
                 if not bridge._ws_clients:
@@ -184,5 +184,5 @@ def controlWebsocketRun(scanner: Scanner, host: str, port: int, stopEvent: threa
         reload=False
     )
     server = uvicorn.Server(config)
-    server.should_exit = stopEvent
+    server.should_exit = stopEvent.is_set()
     server.run()

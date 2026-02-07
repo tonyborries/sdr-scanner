@@ -122,7 +122,7 @@ class MagToPowerLowPass_EmbeddedPythonBlock(gr.sync_block):
 class ChannelConfig():
     def __init__(self, freq_hz: int, label: str, mode: ChannelMode=ChannelMode.FM, audioGain_dB: float=0, dwellTime_s: float=3.0, squelchThreshold:float=-55.0, mute:bool=False, solo:Optional[bool]=None, hold:bool=False):
 
-        self.id = uuid.uuid4()
+        self.id = str(uuid.uuid4())
 
         self.freq_hz = freq_hz
         self.label = label

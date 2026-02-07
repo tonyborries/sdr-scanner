@@ -59,11 +59,11 @@ function App() {
       <span>The Control WebSocket is currently <b>{connectionStatus}</b></span>
 
       <div className={styles.channelsContainer}>
-        <div className="">
-          <ActiveChannelList scannerConfigData={scannerConfigData}/>
+        <div className={styles.activeChannelList}>
+          <ActiveChannelList scannerConfigData={scannerConfigData} controlWsSendJsonMessage={sendJsonMessage} />
         </div>
         <div className={styles.channelsConfigList}>
-          <ChannelConfigList scannerConfigData={scannerConfigData}/>
+          <ChannelConfigList scannerConfigData={scannerConfigData} controlWsSendJsonMessage={sendJsonMessage} />
         </div>
       </div>
 

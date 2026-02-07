@@ -23,7 +23,7 @@ class Scanner():
         """
 
         self.channelConfigs: List[ChannelConfig] = []
-        self._channelConfigByIdCache = {}
+        self._channelConfigByIdCache: Dict[str, ChannelConfig] = {}
 
         self.scanWindowConfigs: List[ScanWindowConfig] = []
 
@@ -111,7 +111,7 @@ class Scanner():
     def addProcessQueueCallback(self, cb):
         self._processQueueCallbacks.append(cb)
 
-    def getChannelById(self, channelId) -> Optional[ChannelConfig]:
+    def getChannelById(self, channelId: str) -> Optional[ChannelConfig]:
         if channelId in self._channelConfigByIdCache:
             return self._channelConfigByIdCache[channelId]
         for cc in self.channelConfigs:
@@ -176,7 +176,7 @@ class Scanner():
             except queue.Empty:
                 pass
 
-    def _channelEnable(self, channelId, enable: bool=True):
+    def _channelEnable(self, channelId: str, enable: bool=True):
         cc = self.getChannelById(channelId)
         if not cc:
             raise Exception(f"Channel '{channelId}' not found")
@@ -185,7 +185,7 @@ class Scanner():
             self._configDirty = True
         cc.enable(enable)
 
-    def _channelDisableUntil(self, channelId, disableUntil: float):
+    def _channelDisableUntil(self, channelId: str, disableUntil: float):
         """
         disableUnitl
             (float) Unix time
@@ -201,7 +201,7 @@ class Scanner():
             self._configDirty = True
         cc.disableUntil(disableUntil)
 
-    def _channelMute(self, channelId, mute):
+    def _channelMute(self, channelId: str, mute):
         cc = self.getChannelById(channelId)
         if not cc:
             raise Exception(f"Channel '{channelId}' not found")
@@ -220,7 +220,7 @@ class Scanner():
             ])
         self.sendUpdatedChannelConfig(cc)
 
-    def _channelSolo(self, channelId, solo: bool):
+    def _channelSolo(self, channelId: str, solo: bool):
         cc = self.getChannelById(channelId)
         if not cc:
             raise Exception(f"Channel '{channelId}' not found")
@@ -249,7 +249,7 @@ class Scanner():
                 ])
             self.sendUpdatedChannelConfig(cc)
 
-    def _channelHold(self, channelId, hold):
+    def _channelHold(self, channelId: str, hold):
         cc = self.getChannelById(channelId)
         if not cc:
             raise Exception(f"Channel '{channelId}' not found")
@@ -268,7 +268,7 @@ class Scanner():
             ])
         self.sendUpdatedChannelConfig(cc)
 
-    def _channelForceActive(self, channelId, forceActive=True):
+    def _channelForceActive(self, channelId: str, forceActive=True):
         cc = self.getChannelById(channelId)
         if not cc:
             raise Exception(f"Channel '{channelId}' not found")

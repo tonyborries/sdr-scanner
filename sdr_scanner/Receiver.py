@@ -292,7 +292,7 @@ class Receiver():
 class ReceiverConfig():
 
     def __init__(self, rxTypeStr: str, receiverArgs: Dict[str, Any]):
-        self.id = uuid.uuid4()
+        self.id = str(uuid.uuid4())
 
         self.receiverArgs = receiverArgs
         if self.receiverArgs is None:
