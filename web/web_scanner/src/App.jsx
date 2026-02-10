@@ -2,6 +2,7 @@ import { useEffect, useState, useReducer } from 'react'
 import useWebSocket, { ReadyState } from "react-use-websocket"
 
 import scannerConfigReducer from './scannerConfigReducer.js'
+import WebSocketAudioPlayer from './AudioPlayer.jsx'
 import {ChannelConfigList, ActiveChannelList} from './Channel.jsx'
 
 import './App.css'
@@ -60,6 +61,7 @@ function App() {
 
       <div className={styles.channelsContainer}>
         <div className={styles.activeChannelList}>
+          <WebSocketAudioPlayer />
           <ActiveChannelList scannerConfigData={scannerConfigData} controlWsSendJsonMessage={sendJsonMessage} />
         </div>
         <div className={styles.channelsConfigList}>

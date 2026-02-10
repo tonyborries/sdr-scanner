@@ -18,6 +18,7 @@ services:
       - "5173:5173"
     environment:
       VITE_CONTROL_WS_URL: "ws://0.0.0.0:8080/control_ws"
+      VITE_AUDIO_WS_URL: "ws://0.0.0.0:8123/"
     volumes:
       - ./web/web_scanner/:/app
     restart: no
