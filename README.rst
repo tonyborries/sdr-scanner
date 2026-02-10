@@ -309,6 +309,36 @@ changes are not persisted, and will be reset upon Scanner restart. The following
 - **Pause** - Resets the Squelch from a Forced Active, or reset the Alert detection on an EAS Channel.
 
 
+Web Interface
+-------------
+
+To use the AudioPlayer in the web interface, you must configure a **websocket** Audio Output in the configuration file,
+and configure the IP/Port appropriately in the docker-compose.yaml file.
+
+To run the Scanner in Docker::
+
+    docker compose build
+    docker compose up
+
+
+To run the Scanner outside of Docker (e.g., to use the wxPython app locally), you must start it with the Control WebSocket enabled::
+
+    python3 gui_scan.py --controlWsHost 0.0.0.0 --controlWsPort 8080
+
+
+Then you can run the web interface separately in Docker::
+
+    docker compose build sdr_web
+    docker compose up sdr_web
+
+
+The default ports are as follows:
+
+    - 8080 - Control WebSocket (Scanner)
+    - 8123 - Audio WebSocket (Scanner, must be configured in sdrscan.yaml config)
+    - 5173 - HTTP Web Interface (sdr_web container)
+
+
 Channel Modes
 =============
 
