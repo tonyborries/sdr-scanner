@@ -89,11 +89,13 @@ class AudioServerConfig(object):
         if configDict['type'].lower() == 'local':
             return AudioServerOutput_Local()
         elif configDict['type'].lower() == 'udp':
-            return AudioServerOutput_UDP(configDict['serverIp'], configDict['serverPort'])
+            return AudioServerOutput_UDP(configDict['serverIp'], int(configDict['serverPort']))
         elif configDict['type'].lower() == 'icecast':
             return AudioServerOutput_Icecast(configDict['url'], configDict['username'], configDict['password'])
+        elif configDict['type'].lower() == 'broadcastify':
+            return AudioServerOutput_Broadcastify(configDict['url'], configDict['username'], configDict['password'])
         elif configDict['type'].lower() == 'websocket':
-            return AudioServerOutput_Websocket(configDict['host'], configDict['port'])
+            return AudioServerOutput_Websocket(configDict['host'], int(configDict['port']))
         raise Exception(f"Unknown Audio Output Type: {configDict}")
 
 
@@ -379,7 +381,7 @@ class AudioServerOutput_UDP(AudioServerOutput_Base):
     SAMPLES_PER_PACKET = 100
     BUFFER_LEN = 10000
 
-    def __init__(self, serverIp, serverPort) -> None:
+    def __init__(self, serverIp: str, serverPort: int) -> None:
         self._outputBuffer: collections.deque = collections.deque(maxlen=self.BUFFER_LEN)
 
         self._socket: Optional[socket.socket] = None
@@ -432,7 +434,7 @@ class AudioServerOutput_Icecast(AudioServerOutput_Base):
     SAMPLES_PER_FRAME = AUDIO_SAMPLERATE // 4
     BUFFER_LEN = SAMPLES_PER_FRAME * 3
 
-    def __init__(self, url, username, password) -> None:
+    def __init__(self, url: str, username: str, password: str) -> None:
         self._outputBuffer: collections.deque = collections.deque(maxlen=self.BUFFER_LEN)
 
         self._url = url
@@ -512,6 +514,195 @@ class AudioServerOutput_Icecast(AudioServerOutput_Base):
                     return
                 time.sleep(0.001)
         print("Exiting Icecast Thread")
+
+    def send(self, samples: List[int]) -> None:
+        self._outputBuffer.extend(samples)
+
+
+class AudioServerOutput_Broadcastify(AudioServerOutput_Base):
+    """
+    Stream MP3 Audio to an Icecast-compatible server using the SOURCE protocol
+    (Broadcastify expects this; it will not accept HTTP PUT streaming).
+
+    Adapted from https://github.com/baendres/sdr-scanner/commit/d65674afbefd03cdf3b8f9803d9481bfa25826e7
+    """
+
+    SAMPLES_PER_FRAME = AUDIO_SAMPLERATE // 4
+    BUFFER_LEN = SAMPLES_PER_FRAME * 3
+
+    def __init__(self, url: str, username: str, password: str) -> None:
+        import base64
+        from urllib.parse import urlparse
+
+        self._outputBuffer: collections.deque = collections.deque(maxlen=self.BUFFER_LEN)
+
+        self._url = url
+        self._username = username
+        self._password = password
+        self._mp3Bitrate = 48000
+
+        # parsed URL parts
+        parsedUrl = urlparse(url)
+        self._host = parsedUrl.hostname
+        self._port = parsedUrl.port or 80
+        self._mount = parsedUrl.path or "/"
+        if not self._host or not self._mount.startswith("/"):
+            raise Exception(f"Invalid URL: {url}")
+
+        self._auth_b64 = base64.b64encode(f"{self._username}:{self._password}".encode("utf-8")).decode("ascii")
+
+        self._stopEvent: Optional[threading.Event] = None
+        self._streamingThread: Optional[threading.Thread] = None
+
+    def reconnect(self) -> None:
+        self.close()
+        self._stopEvent = threading.Event()
+        self._streamingThread = threading.Thread(
+            target=self._runIcecastStream,
+            daemon=True,
+            args=(self._stopEvent,),
+        )
+        self._streamingThread.start()
+
+    def close(self) -> None:
+        if self._stopEvent is not None:
+            self._stopEvent.set()
+            self._stopEvent = None
+
+        if self._streamingThread is not None:
+            self._streamingThread.join(timeout=2.0)
+            self._streamingThread = None
+
+    def _streamDataGen(self, stopEvt) -> Generator[bytes, None, None]:
+        # MP3 encoder
+        mp3Encoder = lameenc.Encoder()
+        if mp3Encoder is None:
+            print("ERROR: Failed initializing MP3 encoding for Broadcastify")
+            return
+        mp3Encoder.set_bit_rate(self._mp3Bitrate)
+        mp3Encoder.set_in_sample_rate(AUDIO_SAMPLERATE)
+        mp3Encoder.set_channels(1)
+        mp3Encoder.set_quality(2)
+
+        while not stopEvt.is_set():
+            if len(self._outputBuffer) >= self.SAMPLES_PER_FRAME:
+                samps: np.ndarray = np.ndarray([self.SAMPLES_PER_FRAME], dtype=np.int16)
+                for i in range(0, self.SAMPLES_PER_FRAME):
+                    samps[i] = self._outputBuffer.popleft()
+
+                mp3out = mp3Encoder.encode(samps.tobytes())
+                if mp3out:
+                    yield mp3out
+            else:
+                time.sleep(0.1)
+
+    def _read_http_response_headers(self, sock: socket.socket, stopEvt) -> Tuple[int, str]:
+        """
+        Read until blank line. Return (status_code, status_line).
+        """
+        sock.settimeout(10.0)
+        data = b""
+        # header terminator can be \r\n\r\n or \n\n (rare)
+        while (b"\r\n\r\n" not in data) and (b"\n\n" not in data):
+            if stopEvt.is_set():
+                raise Exception("stopped")
+            chunk = sock.recv(4096)
+            if not chunk:
+                raise Exception("Remote closed connection during headers")
+            data += chunk
+            if len(data) > 64 * 1024:
+                raise Exception("Header too large")
+
+        header_blob = data.split(b"\r\n\r\n", 1)[0].split(b"\n\n", 1)[0]
+        lines = header_blob.decode("iso-8859-1", errors="replace").splitlines()
+        status_line = lines[0] if lines else ""
+        # Typical: "HTTP/1.0 200 OK" or "ICY 200 OK"
+        parts = status_line.split()
+        code = 0
+        if len(parts) >= 2:
+            try:
+                code = int(parts[1])
+            except Exception:
+                code = 0
+        return code, status_line
+
+    def _connect_source_socket(self, stopEvt) -> socket.socket:
+        """
+        Open socket and perform Icecast SOURCE handshake.
+        """
+        print(f"Connecting to Broadcastify Stream (SOURCE): {self._url}")
+
+        s = socket.create_connection((self._host, self._port), timeout=10.0)
+        s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+
+        # Minimal SOURCE headers. Broadcastify generally only needs these.
+        # Note: "ICE/1.0" is important for many Icecast implementations.
+        req = (
+            f"SOURCE {self._mount} ICE/1.0\r\n"
+            f"Host: {self._host}\r\n"
+            f"Authorization: Basic {self._auth_b64}\r\n"
+            f"Content-Type: audio/mpeg\r\n"
+            f"User-Agent: sdr-scanner\r\n"
+            f"Ice-Name: sdr-scanner\r\n"
+            f"\r\n"
+        ).encode("utf-8")
+
+        s.sendall(req)
+
+        code, status = self._read_http_response_headers(s, stopEvt)
+        if code != 200:
+            try:
+                s.close()
+            except Exception:
+                pass
+            raise Exception(f"Icecast SOURCE rejected: {status}")
+
+        # after headers accepted, keep socket in streaming mode
+        s.settimeout(None)
+        print(f"Icecast SOURCE connected: {status}")
+        return s
+
+    def _runIcecastStream(self, stopEvt) -> None:
+        backoff = 5  # seconds
+        while not stopEvt.is_set():
+            # Dump outputBuffer
+            self._outputBuffer.clear()
+
+            sock = None
+            try:
+                sock = self._connect_source_socket(stopEvt)
+
+                # Stream forever until stop or error
+                for mp3chunk in self._streamDataGen(stopEvt):
+                    if stopEvt.is_set():
+                        break
+                    if not mp3chunk:
+                        continue
+                    sock.sendall(mp3chunk)
+
+                # graceful close
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)
+                except Exception:
+                    pass
+
+            except Exception as e:
+                print(f"Error streaming to Broadcastify: {e}")
+            finally:
+                if sock is not None:
+                    try:
+                        sock.close()
+                    except Exception:
+                        pass
+
+            # reconnect delay
+            timeoutTime = time.time() + backoff
+            while time.time() < timeoutTime:
+                if stopEvt.is_set():
+                    return
+                time.sleep(0.05)
+
+        print("Exiting Broadcastify Thread")
 
     def send(self, samples: List[int]) -> None:
         self._outputBuffer.extend(samples)

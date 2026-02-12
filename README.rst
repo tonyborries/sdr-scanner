@@ -207,7 +207,21 @@ Sends MP3 audio to an Icecast server::
 
     - type: icecast
       url: http://127.0.0.1:8000/scanner
+      username: scannerUser
       password: hackme
+
+Broadcastify
+^^^^^^^^^^^^
+
+Streams audio to Broadcastify. This is similar to the Icecast output, but uses the legacy SOURCE protocol.
+Thanks to `baendres <https://github.com/baendres/sdr-scanner/commit/d65674afbefd03cdf3b8f9803d9481bfa25826e7>`__ for
+figuring out the integration details::
+
+    - type: broadcastify
+      url: http://audio1.broadcastify.com:80/myStreamId
+      username: source
+      password: hackme
+
 
 Websocket
 ^^^^^^^^^
