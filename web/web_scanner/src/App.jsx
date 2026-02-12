@@ -1,4 +1,4 @@
-import { useEffect, useState, useReducer } from 'react'
+import { useEffect, useMemo, useReducer } from 'react'
 import useWebSocket, { ReadyState } from "react-use-websocket"
 
 import scannerConfigReducer from './scannerConfigReducer.js'
@@ -15,9 +15,13 @@ function App() {
   // Control Websocket
 
   // const controlWebsocketUrl = process.env.REACT_APP_CONTROL_WS_URL;
-  const controlWebsocketUrl = import.meta.env.VITE_CONTROL_WS_URL;
+  const controlWebsocketUrl = useMemo(() => {
+    if (import.meta.env.VITE_CONTROL_WS_URL.includes('<HOSTNAME>')) {
+      return import.meta.env.VITE_CONTROL_WS_URL.replace('<HOSTNAME>', window.location.hostname)
+    }
+    return import.meta.env.VITE_CONTROL_WS_URL;
+  }, []);
 
-  // const [socketUrl, setSocketUrl] = useState('ws://0.0.0.0:8080/control_ws');
   const { sendJsonMessage, lastJsonMessage, readyState } = useWebSocket(controlWebsocketUrl);
 
   useEffect(() => {

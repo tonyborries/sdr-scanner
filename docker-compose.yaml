@@ -17,9 +17,10 @@ services:
     ports:
       - "5173:5173"
     environment:
-      VITE_CONTROL_WS_URL: "ws://0.0.0.0:8080/control_ws"
-      VITE_AUDIO_WS_URL: "ws://0.0.0.0:8123/"
-    volumes:
-      - ./web/web_scanner/:/app
+      # In the following, '<HOSTNAME>' is replaced with window.location.hostname in the browser
+      VITE_CONTROL_WS_URL: "ws://<HOSTNAME>:8080/control_ws"
+      VITE_AUDIO_WS_URL: "ws://<HOSTNAME>:8123/"
+    # volumes:  # Enable for local dev
+    #   - ./web/web_scanner/:/app
     restart: no
     command: npm run dev -- --host 0.0.0.0

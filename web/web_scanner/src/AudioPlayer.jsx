@@ -1,10 +1,16 @@
-import { useEffect, useState, useRef } from 'react'
+import { useState, useMemo } from 'react'
 import styles from './AudioPlayer.module.css';
 
 
 export default function WebSocketAudioPlayer() {
     // const wsAudioUrl = "ws://0.0.0.0:8123/";
-    const wsAudioUrl = import.meta.env.VITE_AUDIO_WS_URL;
+    const wsAudioUrl = useMemo(() => {
+        if (import.meta.env.VITE_AUDIO_WS_URL.includes('<HOSTNAME>')) {
+          return import.meta.env.VITE_AUDIO_WS_URL.replace('<HOSTNAME>', window.location.hostname)
+        }
+        return import.meta.env.VITE_AUDIO_WS_URL;
+      }, []);
+    
 
     const [audioCtx, setAudioCtx] = useState(null);
     const [gainNode, setGainNode] = useState(null);

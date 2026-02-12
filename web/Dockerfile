@@ -4,7 +4,7 @@ FROM node
 RUN apt-get update
 RUN apt-get install -y vim
 
-RUN npm install -g vite
+# RUN npm install -g vite
 
 WORKDIR /app
 COPY web_scanner/ /app
