@@ -16,10 +16,7 @@ function App() {
 
   // const controlWebsocketUrl = process.env.REACT_APP_CONTROL_WS_URL;
   const controlWebsocketUrl = useMemo(() => {
-    if (import.meta.env.VITE_CONTROL_WS_URL.includes('<HOSTNAME>')) {
-      return import.meta.env.VITE_CONTROL_WS_URL.replace('<HOSTNAME>', window.location.hostname)
-    }
-    return import.meta.env.VITE_CONTROL_WS_URL;
+    return import.meta.env.VITE_CONTROL_WS_URL.replace('<HOSTNAME>', window.location.hostname);
   }, []);
 
   const { sendJsonMessage, lastJsonMessage, readyState } = useWebSocket(controlWebsocketUrl);

@@ -26,16 +26,16 @@ const getStatusString = (status) =>{
 const getChannelBackgroundColor = (currentStatus) => {
   switch (currentStatus) {
     case 0:
-      return 'white';
+      return '#606060';
     case 1:
-      return '#70F070';
+      return '#20A020';
     case 2:
     case 3:
-      return '#FCF55F';
+      return '#D5B60A';
     case 4:
-      return '#E08080';
+      return '#C06060';
     default:
-      return 'white'; // Default color
+      return '#606060'; // Default color
   }
 };
 
@@ -284,7 +284,7 @@ function RSSIBars({ rssi_dBFS, squelchThreshold_dBFS }) {
     bar: {
       flex: 1,
       borderRadius: '2px',
-      border: '2px solid black',
+      border: '2px solid #555',
     },
   };
 
@@ -330,7 +330,7 @@ function VolumeBar({ channelConfig }) {
       width: '150px',
       height: '15px',
       gap: '3px',
-      border: '3px solid black',
+      border: '3px solid #555',
       borderRadius: '2px',
       overflow: 'hidden', /* Ensures the inner bar stays within the rounded corners */
     },

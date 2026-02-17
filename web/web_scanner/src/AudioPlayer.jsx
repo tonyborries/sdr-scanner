@@ -5,11 +5,8 @@ import styles from './AudioPlayer.module.css';
 export default function WebSocketAudioPlayer() {
     // const wsAudioUrl = "ws://0.0.0.0:8123/";
     const wsAudioUrl = useMemo(() => {
-        if (import.meta.env.VITE_AUDIO_WS_URL.includes('<HOSTNAME>')) {
-          return import.meta.env.VITE_AUDIO_WS_URL.replace('<HOSTNAME>', window.location.hostname)
-        }
-        return import.meta.env.VITE_AUDIO_WS_URL;
-      }, []);
+        return import.meta.env.VITE_AUDIO_WS_URL.replace('<HOSTNAME>', window.location.hostname);
+    }, []);
     
 
     const [audioCtx, setAudioCtx] = useState(null);
