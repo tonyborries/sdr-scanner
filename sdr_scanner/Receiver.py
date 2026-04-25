@@ -2,19 +2,18 @@
 import os
 os.environ['SOAPY_SDR_LOG_LEVEL'] = 'WARNING'
 
-import contextlib
 from enum import IntEnum
 from multiprocessing import shared_memory
 import time
 from typing import Any, Dict, List, Optional
 import uuid
 
-from gnuradio import audio
+from gnuradio import blocks
 from gnuradio import gr
 from gnuradio import soapy
 
 from .const import AUDIO_SAMPLERATE, BFM_QUAD_RATE, FM_QUAD_RATE, MAX_RF_SAMPLERATE
-from .AudioServer import AudioSender, AudioSender_grEmbeddedPythonBlock
+from .AudioServer import AudioSender, AudioSender_grEmbeddedPythonBlock, AudioSelector_grEmbeddedPythonBlock
 from .Channel import Channel
 from .ScanWindow import ScanWindow, ScanWindowConfig
 
@@ -42,8 +41,96 @@ class ReceiverBlock(gr.top_block):
         self.status: ReceiverStatus = ReceiverStatus.IDLE
         self._windowTimeout = 0.0
         self._scanWindow: Optional[ScanWindow] = None
+        self._scanWindowsById: Dict[str, ScanWindow] = {}
+        self._scanWindowIndexById: Dict[str, int] = {}
+        self._graphBuilt = False
+        self._graphRunning = False
+        self._sourceBlock = None
+        self._blockRfSelector = None
+        self._blockRfDiscardSink = None
+        self._rfDiscardPortIndex: int = -1
+        self._blockAudioSelector = None
+        self._lastSetSampleRate = 0
 
         self._cachedSampleRates: Optional[List[int]] = None
+
+    def _getSourceBlock(self):
+        raise NotImplementedError()
+
+    def _configureSource(self) -> None:
+        """
+        Configure source settings independent of specific window tuning.
+        """
+        pass
+
+    def _tuneSource(self, scanWindow: ScanWindow) -> None:
+        if scanWindow.rfSampleRate != self._lastSetSampleRate:
+            # Changing SampleRate takes ~100ms - try to avoid
+            self._sourceBlock.set_sample_rate(0, scanWindow.rfSampleRate)
+            self._lastSetSampleRate = scanWindow.rfSampleRate
+        self._sourceBlock.set_frequency(0, scanWindow.hardwareFreq_hz)
+
+    def buildGraph(self, scanWindowsById: Dict[str, ScanWindow], audioSink) -> None:
+        """
+        Build one large graph with all ScanWindows. Select the active ScanWindow
+        blocks using selectors for the incoming RF and output Audio.
+        """
+
+        self.shutdownGraph()
+
+        if not scanWindowsById:
+            raise Exception("No ScanWindows available to build receiver graph")
+
+        self._scanWindow = None
+        self._windowTimeout = 0.0
+        self._scanWindowsById = dict(scanWindowsById)
+        self._scanWindowIndexById = {}
+
+        self._sourceBlock = self._getSourceBlock()
+        self._configureSource()
+
+        windowCount = len(self._scanWindowsById)
+        # for the RF, one extra selector output discards samples when idle (no scan window).
+        self._rfDiscardPortIndex = windowCount
+        self._blockRfSelector = blocks.selector(gr.sizeof_gr_complex, 0, self._rfDiscardPortIndex)
+        self._blockAudioSelector = AudioSelector_grEmbeddedPythonBlock(windowCount)
+        self._blockRfDiscardSink = blocks.null_sink(gr.sizeof_gr_complex)
+
+        self.connect((self._sourceBlock, 0), (self._blockRfSelector, 0))
+
+        for idx, sw in enumerate(self._scanWindowsById.values()):
+            self._scanWindowIndexById[sw.id] = idx
+            self.connect((self._blockRfSelector, idx), (sw.scanWindowBlock, 0))
+            self.connect((sw.scanWindowBlock, 0), (self._blockAudioSelector, idx))
+
+        self.connect((self._blockRfSelector, self._rfDiscardPortIndex), (self._blockRfDiscardSink, 0))
+        self.connect((self._blockAudioSelector, 0), (audioSink, 0))
+
+        self._graphBuilt = True
+        self.status = ReceiverStatus.IDLE
+
+        self.ensureRunning()
+
+    def ensureRunning(self) -> None:
+        if not self._graphRunning:
+            self.start()
+            self._graphRunning = True
+
+    def shutdownGraph(self) -> None:
+        if self._graphRunning:
+            self.stop()
+            self.wait()
+            self._graphRunning = False
+        self._scanWindow = None
+        self._windowTimeout = 0.0
+        self.status = ReceiverStatus.IDLE
+        self._graphBuilt = False
+        self._scanWindowIndexById = {}
+        self._blockRfSelector = None
+        self._blockRfDiscardSink = None
+        self._rfDiscardPortIndex = -1
+        self._blockAudioSelector = None
+        self._scanWindowsById = {}
 
     def setupWindow(self, scanWindow, audioSink) -> None:
         raise NotImplementedError()
@@ -51,17 +138,33 @@ class ReceiverBlock(gr.top_block):
     def teardownWindow(self, scanWindow, audioSink) -> None:
         raise NotImplementedError()
 
-    def startWindow(self) -> None:
-        if self._scanWindow is None:
-            raise Exception("ScanWindow not configured")
+    def startWindow(self, windowId: str) -> ScanWindow:
+        if not self._graphBuilt:
+            raise Exception("Receiver graph not built")
+        if windowId not in self._scanWindowsById:
+            raise Exception(f"Window not found in receiver graph: {windowId}")
+        if windowId not in self._scanWindowIndexById:
+            raise Exception(f"Window index mapping not found: {windowId}")
+
+        sw = self._scanWindowsById[windowId]
+        swIdx = self._scanWindowIndexById[windowId]
+
+        self._scanWindow = sw
+        self._tuneSource(sw)
+        self.ensureRunning()
+        # let tuning stabilize and flush samples to avoid tripping up squelch from invalid data
+        time.sleep(self._receiverArgs.get('tunePause', 0.020))
+        self._blockAudioSelector.set_input_index(swIdx)
+        self._blockRfSelector.set_output_index(swIdx)
 
         self.status = ReceiverStatus.RUNNING_WINDOW
-        self.start()
-        self._windowTimeout = time.time() + self._scanWindow.getMinimumScanTime()
+        self._windowTimeout = time.time() + sw.getMinimumScanTime()
+        return sw
 
     def stopWindow(self) -> None:
-        self.stop()
-        self.wait()
+        self._scanWindow = None
+        if self._graphBuilt:
+            self._blockRfSelector.set_output_index(self._rfDiscardPortIndex)
         self.status = ReceiverStatus.IDLE
 
     def checkWindow(self, statusPipe) -> bool:
@@ -103,7 +206,7 @@ class Receiver_RTLSDR(ReceiverBlock):
 
         self.soapy_rtlsdr_source_0 = None
         dev = 'driver=rtlsdr'
-        stream_args = ''
+        stream_args = self._receiverArgs.get('streamArgs', 'bufflen=131072,buffers=8')
         tune_args = ['']
         settings = ['']
 
@@ -119,22 +222,8 @@ class Receiver_RTLSDR(ReceiverBlock):
     def __str__(self):
         return f"RTL-SDR {self._receiverArgs}"
 
-    def setupWindow(self, scanWindow, audioSink) -> None:
-
-        self._scanWindow = scanWindow
-
-        # tune radio to window center freq
-        self.soapy_rtlsdr_source_0.set_sample_rate(0, scanWindow.rfSampleRate)
-        self.soapy_rtlsdr_source_0.set_frequency(0, scanWindow.hardwareFreq_hz)
-
-        # connect window to receiver and output audio
-        self.connect( (scanWindow.scanWindowBlock, 0), (audioSink, 0) )
-        self.connect( (self.soapy_rtlsdr_source_0, 0), (scanWindow.scanWindowBlock, 0) )
-
-    def teardownWindow(self, scanWindow, audioSink) -> None:
-        # disconnect
-        self.disconnect( (self.soapy_rtlsdr_source_0, 0), (scanWindow.scanWindowBlock, 0) )
-        self.disconnect( (scanWindow.scanWindowBlock, 0), (audioSink, 0) )
+    def _getSourceBlock(self):
+        return self.soapy_rtlsdr_source_0
 
     def getSampleRates(self) -> List[int]:
         return self.SAMPLE_RATES
@@ -155,7 +244,7 @@ class Receiver_SOAPY(ReceiverBlock):
 
         self.blockSoapySource = None
         self._dev = f"driver={self._receiverArgs['driver']}"
-        self._stream_args = ''
+        self._stream_args = self._receiverArgs.get('streamArgs', '')
         self._tune_args = ['']
         self._settings = ['']
 
@@ -179,34 +268,18 @@ class Receiver_SOAPY(ReceiverBlock):
     def __str__(self):
         return f"SOAPY-SDR {self._receiverArgs}"
 
-    def setupWindow(self, scanWindow, audioSink) -> None:
-
+    def _getSourceBlock(self):
         self._buildSourceBlock()
+        return self.blockSoapySource
 
-        self._scanWindow = scanWindow
-
-        # tune radio to window center freq
-        self.blockSoapySource.set_sample_rate(0, scanWindow.rfSampleRate)
-        self.blockSoapySource.set_frequency(0, scanWindow.hardwareFreq_hz)
-
+    def _configureSource(self) -> None:
         self.blockSoapySource.set_gain_mode(0, False)
         if self._rxGains:
             for name, gain in self._rxGains.items():
                 self.blockSoapySource.set_gain(self._rxChannel, name, gain)
         else:
             self.blockSoapySource.set_gain(self._rxChannel, self._rxGain)
-
         self.blockSoapySource.set_frequency_correction(0, 0)
-
-        # connect window to receiver and output audio
-        self.connect( (scanWindow.scanWindowBlock, 0), (audioSink, 0) )
-        self.connect( (self.blockSoapySource, 0), (scanWindow.scanWindowBlock, 0) )
-
-    def teardownWindow(self, scanWindow, audioSink) -> None:
-        # disconnect
-        self.disconnect( (self.blockSoapySource, 0), (scanWindow.scanWindowBlock, 0) )
-        self.disconnect( (scanWindow.scanWindowBlock, 0), (audioSink, 0) )
-        self.blockSoapySource = None
 
     def getSampleRates(self) -> List[int]:
         
@@ -335,7 +408,7 @@ def _runAsProcess(pipe, receiverConfig: ReceiverConfig, audioShmBuffer: shared_m
     audioSender = AudioSender(audioShmBuffer, headIdx, tailIdx)
     blockAudioSink = AudioSender_grEmbeddedPythonBlock(audioSender)
 
-    runningWindow = None
+    runningWindow: Optional[ScanWindow] = None
     while True:
 
         ###
@@ -345,23 +418,18 @@ def _runAsProcess(pipe, receiverConfig: ReceiverConfig, audioShmBuffer: shared_m
             packet = pipe.recv()
             for item in packet:
                 if item['type'] == 'config':
-                    if rxBlock.status == ReceiverStatus.RUNNING_WINDOW:
-                        rxBlock.stopWindow()
-                        rxBlock.teardownWindow(runningWindow, blockAudioSink)
+                    rxBlock.shutdownGraph()
+                    runningWindow = None
                     rx.applyConfigDict(item['data'])
+                    rxBlock.buildGraph(rx._scanWindowsById, blockAudioSink)
                 elif item['type'] == 'kill':
-                    if rxBlock.status == ReceiverStatus.RUNNING_WINDOW:
-                        rxBlock.stopWindow()
+                    rxBlock.shutdownGraph()
                     return
                 elif item['type'] == 'scan_window':
                     windowId = item['data']
-                    scanWindow = rx.getScanWindow(windowId)
-                    runningWindow = scanWindow
                     if rxBlock.status != ReceiverStatus.IDLE:
                         raise Exception(f"Received new Scan Window {windowId} while not IDLE")
-                    #print(f"Scanning window {windowId} on {str(rxBlock)}")
-                    rxBlock.setupWindow(scanWindow, blockAudioSink)
-                    rxBlock.startWindow()
+                    runningWindow = rxBlock.startWindow(windowId)
                 elif item['type'] == "ChannelMute":
                     ccId = item['data']['id']
                     mute = item['data']['mute']
@@ -403,7 +471,7 @@ def _runAsProcess(pipe, receiverConfig: ReceiverConfig, audioShmBuffer: shared_m
             if runningWindow is not None:
                 pipe.send([{'type': 'window_done', 'data': runningWindow.id}])
                 runningWindow = None
-            rxBlock.teardownWindow(scanWindow, blockAudioSink)
+            rxBlock.stopWindow()
             rxBlock.status = ReceiverStatus.IDLE
 
         time.sleep(0.001)

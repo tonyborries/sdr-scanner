@@ -104,6 +104,30 @@ For RTL-SDR, Unique serial numbers must be assigned to each (see 'rtl_eeprom').
       - type: RTL-SDR
         deviceArg: serial=00000002
 
+Tuning-Pause Settings
+^^^^^^^^^^^^^^^^^^^^^
+
+We don't stop the SDR between windows, instead we redirect the incoming samples to a Null Sink
+while Idle. When activating a new ScanWindow, some samples will still be in the buffers from the
+old window. This can cause issues in the new window as the Channels will essentially be listening
+to a different frequency, which can cause invalid squelch breaks.
+
+We need to ensure that all old samples are discarded before processing them in the new ScanWindow.
+The 'tunePause' setting (in ms) sets up a delay after tuning to allow the old samples to clear the
+buffers. The settings below have also lowered the buffer sizes to allow a shorter pause. However,
+this may also cause buffer underruns in the processing, leading to dropouts.
+
+Larger buffers will minimize underruns, but require a longer pause, slowing the scanning speed.
+
+The default settings are::
+
+    receivers:
+      - type: RTL-SDR
+        streamArgs: bufflen=131072,buffers=8
+        tunePause: 0.020
+
+
+
 
 Other Receiver Types
 ^^^^^^^^^^^^^^^^^^^^
@@ -172,6 +196,7 @@ Scanner Settings
 - **maxChannelsPerWindow:** - Configures the number of Channels allowed per ScanWindow - if your CPU is
   unable to keep up with the processing (audio dropouts / high latency / lagging UI), lower this to limit
   the number of parallel Channels.
+
 
 Audio outputs
 -------------

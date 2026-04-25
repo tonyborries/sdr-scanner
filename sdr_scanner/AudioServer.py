@@ -139,6 +139,42 @@ class AudioSender_grEmbeddedPythonBlock(gr.sync_block):
         return numWrote
 
 
+class AudioSelector_grEmbeddedPythonBlock(gr.basic_block):
+    """
+    gnuradio block that replaces the standard Selector block, which
+    assumes an equal sample-rate arriving at all inputs. This block
+    instead discards all non-selected inputs regardless of rate.
+    """
+
+    def __init__(self, numInputs: int):
+        gr.basic_block.__init__(
+            self,
+            name='AudioSelector Embedded Python Block',
+            in_sig=[np.float32] * numInputs,
+            out_sig=[np.float32]
+        )
+        self._numInputs = numInputs
+        self._selectedInput = 0
+
+    def set_input_index(self, idx: int):
+        self._selectedInput = idx
+
+    def forecast(self, noutput_items, ninputs):
+        ninput_items_required = [0] * ninputs
+        ninput_items_required[self._selectedInput] = noutput_items + self.gateway.history() - 1
+        return ninput_items_required
+
+    def general_work(self, input_items, output_items):
+        n = min(len(output_items[0]), len(input_items[self._selectedInput]))
+        output_items[0][:n] = input_items[self._selectedInput][:n]
+        for i in range(0, self._numInputs):
+            if i == self._selectedInput:
+                self.consume(i, n)
+            else:
+                self.consume(i, len(input_items[i]))
+        return len(output_items[0])
+
+
 class AudioServer(object):
     """
     Stand-alone process, receives audio streams from Receivers, mixes them down.
